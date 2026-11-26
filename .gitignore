@@ -19,6 +19,9 @@ Thumbs.db
 01_推理工程_C交付/logs/*.log
 01_推理工程_C交付/logs/*.log.*
 
+# UI session outputs (generated at runtime)
+01_推理工程_C交付/runs/ui/
+
 # Ultralytics / torch caches
 .ultralytics/
 *.pt.bak
