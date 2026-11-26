@@ -100,11 +100,6 @@ def setup_page() -> None:
           display: none !important;
         }
         footer { visibility: hidden; }
-        /* 登录区：靠居中列布局，不用假 HTML 包裹控件 */
-        div[data-testid="stVerticalBlockBorderWrapper"] {
-          border-color: #d9e1ea !important;
-          background: rgba(255,255,255,0.72);
-        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -214,6 +209,8 @@ def init_state() -> None:
         st.session_state.prev_tab = "单图检测"
     if "active_tab" not in st.session_state:
         st.session_state.active_tab = "单图检测"
+    if "last_single_view" not in st.session_state:
+        st.session_state.last_single_view = None
 
     if "audit" not in st.session_state:
         logger_obj = audit()
@@ -383,6 +380,96 @@ def list_sample_images() -> list[Path]:
         if folder.is_dir():
             paths.extend(sorted(folder.glob("*")))
     return [p for p in paths if p.suffix.lower() in IMAGE_EXTS]
+
+
+def sample_label(path: Path) -> str:
+    """示例下拉显示名：带父目录，避免重名冲突。"""
+    try:
+        return str(path.relative_to(ROOT.parent)).replace("\\", "/")
+    except ValueError:
+        return f"{path.parent.name}/{path.name}"
+
+
+def _show_single_result_view(view: dict) -> None:
+    """回显最近一次单图检测（含对比）。"""
+    compare_mode = bool(view.get("compare_mode"))
+    path_a = Path(view["path_a"])
+    conf = float(view["conf"])
+    conf_b = float(view.get("conf_b") or conf)
+    model_name = view.get("model_name", "")
+    iou = float(view.get("iou") or 0.0)
+    result_a = view["result_a"]
+    result_b = view.get("result_b")
+    path_b = Path(view["path_b"]) if view.get("path_b") else None
+    json_path = Path(view["json_path"]) if view.get("json_path") else None
+
+    if compare_mode and result_b is not None and path_b is not None:
+        st.caption("显示最近一次对比结果（重新检测前可继续查看）")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown(f"**阈值 A：conf={conf:.2f}**")
+            st.image(bgr_to_rgb(path_a), use_container_width=True)
+            render_timing_metrics(
+                box_count=len(result_a["detections"]),
+                predict_ms=float(result_a["predict_call_ms"]),
+                total_ms=float(result_a["total_ms"]),
+                class_counter=count_classes(result_a["detections"]),
+            )
+            st.dataframe(
+                detections_to_df(result_a["detections"]),
+                use_container_width=True,
+            )
+        with col_b:
+            st.markdown(f"**阈值 B：conf={conf_b:.2f}**")
+            st.image(bgr_to_rgb(path_b), use_container_width=True)
+            render_timing_metrics(
+                box_count=len(result_b["detections"]),
+                predict_ms=float(result_b["predict_call_ms"]),
+                total_ms=float(result_b["total_ms"]),
+                class_counter=count_classes(result_b["detections"]),
+            )
+            st.dataframe(
+                detections_to_df(result_b["detections"]),
+                use_container_width=True,
+            )
+        st.caption(
+            f"对比结论：A 检出 {len(result_a['detections'])} 框，"
+            f"B 检出 {len(result_b['detections'])} 框"
+        )
+    else:
+        st.image(bgr_to_rgb(path_a), caption="检测结果（画框）", use_container_width=True)
+        render_timing_metrics(
+            box_count=len(result_a["detections"]),
+            predict_ms=float(result_a["predict_call_ms"]),
+            total_ms=float(result_a["total_ms"]),
+            class_counter=count_classes(result_a["detections"]),
+            extra_lines=[
+                f"模型：{model_name}",
+                f"conf={conf:.2f}",
+                f"iou={iou:.2f}",
+                f"目录：{view.get('work_name', '-')}",
+            ],
+        )
+        st.dataframe(
+            detections_to_df(result_a["detections"]),
+            use_container_width=True,
+        )
+
+    if json_path is not None and json_path.is_file():
+        if st.download_button(
+            "下载 result.json",
+            data=json_path.read_text(encoding="utf-8"),
+            file_name="result.json",
+            mime="application/json",
+            key=f"dl_single_{view.get('work_name', 'last')}",
+        ):
+            blog(
+                audit().click(
+                    "下载result.json",
+                    file_name=path_a.name,
+                    path=str(json_path),
+                )
+            )
 
 
 def _show_auth_message() -> None:
@@ -668,9 +755,9 @@ def render_sidebar():
                 )
                 ok, message = audit().db.unlock_user_login(unlock_name.strip())
                 if ok:
-                    st.success(message)
+                    st.sidebar.success(message)
                 else:
-                    st.error(message)
+                    st.sidebar.error(message)
 
     model_name = st.sidebar.selectbox(
         "模型切换",
@@ -690,6 +777,7 @@ def render_sidebar():
         f"- {info['note']}"
     )
 
+    st.sidebar.caption("检测时会自动加载；此按钮用于提前预热/验证权重。")
     if st.sidebar.button("加载 / 切换模型", use_container_width=True):
         blog(
             audit().click(
@@ -752,9 +840,11 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             key="single_upload",
         )
         samples = list_sample_images()
+        sample_options = ["（不使用示例）"] + [sample_label(p) for p in samples]
+        sample_lookup = {sample_label(p): p for p in samples}
         sample_name = st.selectbox(
             "或选择示例图片",
-            options=["（不使用示例）"] + [p.name for p in samples[:12]],
+            options=sample_options,
             key="single_sample",
         )
         if sample_name != st.session_state.prev_sample:
@@ -773,6 +863,9 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             )
             st.session_state.last_single_upload = upload.name
 
+        if upload is not None and sample_name != "（不使用示例）":
+            st.caption("已同时选择上传与示例：将优先使用上传图片。")
+
         compare_mode = st.checkbox(
             "同图阈值对比（左右两个 conf）",
             value=False,
@@ -780,12 +873,20 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
         )
         conf_b = conf
         if compare_mode:
+            default_b = round(min(0.95, max(0.05, conf + 0.25)), 2)
+            if "single_compare_conf" not in st.session_state:
+                st.session_state.single_compare_conf = default_b
+            elif abs(float(st.session_state.single_compare_conf) - conf) < 1e-9:
+                st.session_state.single_compare_conf = (
+                    default_b
+                    if abs(default_b - conf) > 1e-9
+                    else min(0.95, round(conf + 0.10, 2))
+                )
             conf_b = st.slider(
                 "对比阈值 conf_b",
-                0.05,
-                0.95,
-                min(0.50, max(0.05, conf + 0.25)),
-                0.01,
+                min_value=0.05,
+                max_value=0.95,
+                step=0.01,
                 key="single_compare_conf",
             )
             st.caption(f"将对比 conf={conf:.2f} 与 conf={conf_b:.2f}")
@@ -794,7 +895,19 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
 
     if not run:
         with right:
-            st.info("上传图片后点击检测，右侧显示画框结果。开启对比后可左右查看不同阈值。")
+            cached = st.session_state.get("last_single_view")
+            if cached and not cached.get("compare_mode"):
+                _show_single_result_view(cached)
+            elif cached and cached.get("compare_mode"):
+                st.caption("最近一次为对比结果，见下方。")
+            else:
+                st.info(
+                    "上传图片后点击检测，右侧显示画框结果。开启对比后可左右查看不同阈值。"
+                )
+        cached = st.session_state.get("last_single_view")
+        if cached and cached.get("compare_mode"):
+            st.markdown("#### 最近一次阈值对比")
+            _show_single_result_view(cached)
         return
 
     blog(
@@ -816,7 +929,7 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             src = save_upload_to_temp(upload, work / "input")
             source_type = "upload"
         elif sample_name != "（不使用示例）":
-            src = next(p for p in samples if p.name == sample_name)
+            src = sample_lookup[sample_name]
             source_type = "sample"
         else:
             blog(
@@ -827,6 +940,8 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
                 )
             )
             st.warning("请先上传图片或选择示例。")
+            with right:
+                st.info("请先在左侧选择图片后再检测。")
             return
 
         imgsz = MODEL_OPTIONS[model_name]["imgsz"]
@@ -900,79 +1015,29 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             encoding="utf-8",
         )
 
-        # 对比模式占满整行，避免塞在右侧半栏里再拆两列
+        view = {
+            "compare_mode": compare_mode,
+            "path_a": str(path_a),
+            "path_b": str(path_b) if path_b is not None else None,
+            "conf": conf,
+            "conf_b": conf_b if compare_mode else None,
+            "model_name": model_name,
+            "iou": iou,
+            "result_a": result_a,
+            "result_b": result_b,
+            "json_path": str(json_path),
+            "work_name": work.name,
+        }
+        st.session_state.last_single_view = view
+
         if compare_mode and result_b is not None and path_b is not None:
+            with right:
+                st.caption("对比结果见下方全宽区域")
             st.markdown("#### 阈值对比结果")
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.markdown(f"**阈值 A：conf={conf:.2f}**")
-                st.image(bgr_to_rgb(path_a), use_container_width=True)
-                render_timing_metrics(
-                    box_count=len(result_a["detections"]),
-                    predict_ms=float(result_a["predict_call_ms"]),
-                    total_ms=float(result_a["total_ms"]),
-                    class_counter=count_classes(result_a["detections"]),
-                )
-            with col_b:
-                st.markdown(f"**阈值 B：conf={conf_b:.2f}**")
-                st.image(bgr_to_rgb(path_b), use_container_width=True)
-                render_timing_metrics(
-                    box_count=len(result_b["detections"]),
-                    predict_ms=float(result_b["predict_call_ms"]),
-                    total_ms=float(result_b["total_ms"]),
-                    class_counter=count_classes(result_b["detections"]),
-                )
-            st.caption(
-                f"对比结论：A 检出 {len(result_a['detections'])} 框，"
-                f"B 检出 {len(result_b['detections'])} 框"
-            )
-            if st.download_button(
-                "下载 result.json",
-                data=json_path.read_text(encoding="utf-8"),
-                file_name="result.json",
-                mime="application/json",
-            ):
-                blog(
-                    audit().click(
-                        "下载result.json", file_name=src.name, path=str(json_path)
-                    )
-                )
+            _show_single_result_view(view)
         else:
             with right:
-                st.image(
-                    bgr_to_rgb(path_a),
-                    caption="检测结果（画框）",
-                    use_container_width=True,
-                )
-                render_timing_metrics(
-                    box_count=len(result_a["detections"]),
-                    predict_ms=float(result_a["predict_call_ms"]),
-                    total_ms=float(result_a["total_ms"]),
-                    class_counter=count_classes(result_a["detections"]),
-                    extra_lines=[
-                        f"模型：{model_name}",
-                        f"conf={conf:.2f}",
-                        f"iou={iou:.2f}",
-                        f"目录：{work.name}",
-                    ],
-                )
-                st.dataframe(
-                    detections_to_df(result_a["detections"]),
-                    use_container_width=True,
-                )
-                if st.download_button(
-                    "下载 result.json",
-                    data=json_path.read_text(encoding="utf-8"),
-                    file_name="result.json",
-                    mime="application/json",
-                ):
-                    blog(
-                        audit().click(
-                            "下载result.json",
-                            file_name=src.name,
-                            path=str(json_path),
-                        )
-                    )
+                _show_single_result_view(view)
     except Exception as exc:
         blog(
             audit().file_process_result(
