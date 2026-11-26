@@ -512,6 +512,9 @@ def render_login() -> None:
                 return
 
             _show_auth_message()
+            # 必须在 radio 实例化前切换，避免 StreamlitWidgetAlreadyInstantiatedError
+            if "_switch_auth_panel" in st.session_state:
+                st.session_state.auth_panel = st.session_state.pop("_switch_auth_panel")
             st.radio(
                 "账号操作",
                 options=["登录", "注册"],
@@ -654,7 +657,7 @@ def render_login() -> None:
                 )
             )
             st.session_state.login_username = reg_username.strip()
-            st.session_state.auth_panel = "登录"
+            st.session_state._switch_auth_panel = "登录"
             for key in ("reg_username", "reg_display", "reg_password", "reg_password2"):
                 if key in st.session_state:
                     del st.session_state[key]
