@@ -18,6 +18,8 @@ Thumbs.db
 # Local logs (keep code, ignore rotating runtime logs)
 01_推理工程_C交付/logs/*.log
 01_推理工程_C交付/logs/*.log.*
+01_推理工程_C交付/logs/*.jsonl
+01_推理工程_C交付/logs/sessions/
 
 # UI session outputs (generated at runtime)
 01_推理工程_C交付/runs/ui/
