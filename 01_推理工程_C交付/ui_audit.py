@@ -80,6 +80,10 @@ def setup_ui_audit_logger(log_dir: Path) -> logging.Logger:
     return logger
 
 
+# 热更新时用于识别 session_state 里是否还是旧对象
+AUDIT_RUNTIME_VERSION = 4
+
+
 class UIAuditLogger:
     """面向界面的全量审计记录器。"""
 
@@ -90,6 +94,7 @@ class UIAuditLogger:
         self.sessions_dir = self.log_dir / "sessions"
         self.active_dir = self.sessions_dir / "active"
         self.db = Database()
+        self._runtime_version = AUDIT_RUNTIME_VERSION
 
         self.session_id = uuid.uuid4().hex[:12]
         self.streamlit_session_id = ""
@@ -110,6 +115,16 @@ class UIAuditLogger:
             self.logger.info("MySQL 已连接 database=%s", self.db.status().get("database"))
 
         self._close_stale_sessions()
+
+    def refresh_db(self) -> None:
+        """热更新后刷新 Database 绑定，避免旧实例缺方法。"""
+        self.db = Database()
+        self._runtime_version = AUDIT_RUNTIME_VERSION
+        if not self.db.enabled:
+            self.logger.warning(
+                "MySQL 刷新后仍不可用。详情=%s",
+                self.db.status(),
+            )
 
     def bind_streamlit_session(self, streamlit_session_id: str) -> None:
         self.streamlit_session_id = streamlit_session_id or ""

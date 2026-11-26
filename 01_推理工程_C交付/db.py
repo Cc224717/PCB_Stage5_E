@@ -527,6 +527,37 @@ class Database:
         self.clear_login_failures(username)
         return True, f"已解除 {username} 的登录锁定"
 
+    def recent_events_for_operator(
+        self,
+        operator: str,
+        *,
+        limit: int = 20,
+        also_match: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self.enabled:
+            return []
+        names: list[str] = []
+        for name in [operator, *(also_match or [])]:
+            value = (name or "").strip()
+            if value and value not in names:
+                names.append(value)
+        if not names:
+            return []
+        placeholders = ", ".join(["%s"] * len(names))
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT created_at, event_type, action, message, level
+                    FROM audit_events
+                    WHERE operator IN ({placeholders})
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (*names, limit),
+                )
+                return list(cur.fetchall() or [])
+
     def ensure_login_guards_table(self) -> None:
         if not self.enabled:
             return

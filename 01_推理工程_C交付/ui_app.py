@@ -8,6 +8,7 @@ PCB 缺陷检测 — 最简展示界面（Streamlit）
 
 from __future__ import annotations
 
+import importlib
 import json
 import traceback
 from pathlib import Path
@@ -17,9 +18,34 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import db as db_mod
+import ui_audit as ui_audit_mod
 from inference_engine import InferenceEngine
 from logging_config import setup_logging
-from ui_audit import UIAuditLogger
+
+
+def _sync_hot_modules() -> None:
+    """Streamlit 热更新时 sys.modules 可能仍是旧文件，缺符号则强制 reload。"""
+    global db_mod, ui_audit_mod, Database, UIAuditLogger, AUDIT_RUNTIME_VERSION
+
+    need_reload = (
+        not hasattr(ui_audit_mod, "AUDIT_RUNTIME_VERSION")
+        or not hasattr(ui_audit_mod, "UIAuditLogger")
+        or not hasattr(getattr(ui_audit_mod, "UIAuditLogger", object), "refresh_db")
+        or not hasattr(db_mod, "Database")
+        or not hasattr(getattr(db_mod, "Database", object), "recent_events_for_operator")
+        or not hasattr(getattr(db_mod, "Database", object), "change_password")
+    )
+    if need_reload:
+        db_mod = importlib.reload(db_mod)
+        ui_audit_mod = importlib.reload(ui_audit_mod)
+
+    Database = db_mod.Database
+    UIAuditLogger = ui_audit_mod.UIAuditLogger
+    AUDIT_RUNTIME_VERSION = int(getattr(ui_audit_mod, "AUDIT_RUNTIME_VERSION", 3))
+
+
+_sync_hot_modules()
 
 
 ROOT = Path(__file__).resolve().parent
@@ -64,10 +90,20 @@ def setup_page() -> None:
         }
         h1, h2, h3 { font-family: "Segoe UI", "IBM Plex Sans", sans-serif; }
         .metric-box {
-          background: rgba(255,255,255,0.7);
+          background: rgba(255,255,255,0.78);
           border: 1px solid #d7dde5;
           border-radius: 12px;
           padding: 0.8rem 1rem;
+        }
+        /* 答辩截图更干净：只隐藏 Deploy，保留必要菜单 */
+        .stAppDeployButton {
+          display: none !important;
+        }
+        footer { visibility: hidden; }
+        /* 登录区：靠居中列布局，不用假 HTML 包裹控件 */
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+          border-color: #d9e1ea !important;
+          background: rgba(255,255,255,0.72);
         }
         </style>
         """,
@@ -92,8 +128,53 @@ def blog(_line: str | None = None) -> None:
     return None
 
 
+def _db_supports_also_match(db_obj: object) -> bool:
+    fn = getattr(db_obj, "recent_events_for_operator", None)
+    code = getattr(fn, "__code__", None)
+    return bool(code and "also_match" in code.co_varnames)
+
+
 def audit() -> UIAuditLogger:
-    return st.session_state.audit
+    """取审计对象；热更新后自动对齐最新模块并重建过期实例。"""
+    _sync_hot_modules()
+    obj = st.session_state.get("audit")
+
+    class_stale = obj is not None and type(obj) is not UIAuditLogger
+    api_stale = obj is not None and (
+        getattr(obj, "_runtime_version", 0) < AUDIT_RUNTIME_VERSION
+        or not hasattr(obj, "refresh_db")
+        or not hasattr(obj, "db")
+        or not hasattr(obj.db, "recent_events_for_operator")
+        or not hasattr(obj.db, "change_password")
+        or not _db_supports_also_match(obj.db)
+    )
+
+    if obj is None or class_stale or api_stale:
+        prev = obj
+        fresh = UIAuditLogger(LOG_DIR)
+        if prev is not None:
+            for attr in (
+                "session_id",
+                "operator",
+                "opened_at",
+                "streamlit_session_id",
+                "click_count",
+                "file_count",
+                "session_file",
+                "closed",
+            ):
+                if hasattr(prev, attr):
+                    setattr(fresh, attr, getattr(prev, attr))
+            # 绑定到最新 Database，避免沿用旧类实例
+            fresh.refresh_db()
+            fresh._runtime_version = AUDIT_RUNTIME_VERSION
+        st.session_state.audit = fresh
+        return fresh
+
+    # 类仍匹配，仅刷新 db 绑定以防残留旧连接对象
+    if type(obj.db) is not Database:
+        obj.refresh_db()
+    return obj
 
 
 def init_state() -> None:
@@ -135,18 +216,21 @@ def init_state() -> None:
         st.session_state.active_tab = "单图检测"
 
     if "audit" not in st.session_state:
-        st.session_state.audit = UIAuditLogger(LOG_DIR)
-        st.session_state.audit.bind_streamlit_session(_streamlit_session_id())
+        logger_obj = audit()
+        logger_obj.bind_streamlit_session(_streamlit_session_id())
         try:
-            st.session_state.audit.db.ensure_users_table()
-            st.session_state.audit.db.ensure_login_guards_table()
+            logger_obj.db.ensure_users_table()
+            logger_obj.db.ensure_login_guards_table()
         except Exception as exc:
             st.session_state.logger.error("初始化用户相关表失败: %s", exc)
-        st.session_state.audit.session_open(
+        logger_obj.session_open(
             page="PCB缺陷检测系统",
             client_info={"streamlit_session_id": _streamlit_session_id()},
         )
-        st.session_state.logger.info("UI 会话打开 session=%s", st.session_state.audit.session_id)
+        st.session_state.logger.info("UI 会话打开 session=%s", logger_obj.session_id)
+    else:
+        # 已有对象时也走 audit()，避免热更新后继续用旧类/旧 Database
+        audit()
 
 
 def ensure_engine(model_name: str, conf: float, iou: float) -> InferenceEngine:
@@ -199,6 +283,51 @@ def ensure_engine(model_name: str, conf: float, iou: float) -> InferenceEngine:
             blog(line)
 
     return st.session_state.engine
+
+
+def count_classes(detections: list[dict]) -> dict[str, int]:
+    counter: dict[str, int] = {}
+    for item in detections:
+        name = item.get("class_name", "unknown")
+        counter[name] = counter.get(name, 0) + 1
+    return dict(sorted(counter.items(), key=lambda x: (-x[1], x[0])))
+
+
+def render_timing_metrics(
+    *,
+    box_count: int,
+    predict_ms: float,
+    total_ms: float | None = None,
+    fps: float | None = None,
+    class_counter: dict[str, int] | None = None,
+    extra_lines: list[str] | None = None,
+) -> None:
+    """清晰展示检测框、类别统计与耗时。"""
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("检测框", f"{box_count}")
+    c2.metric("推理耗时", f"{predict_ms:.1f} ms")
+    if total_ms is not None:
+        c3.metric("总耗时", f"{total_ms:.1f} ms")
+    else:
+        c3.metric("总耗时", "-")
+    if fps is not None:
+        c4.metric("估算 FPS", f"{fps:.2f}")
+    else:
+        approx_fps = (1000.0 / predict_ms) if predict_ms > 0 else 0.0
+        c4.metric("约合 FPS", f"{approx_fps:.2f}")
+
+    class_counter = class_counter or {}
+    if class_counter:
+        chips = " · ".join(f"**{name}** × {cnt}" for name, cnt in class_counter.items())
+        st.markdown(
+            f"<div class='metric-box'><b>类别统计</b><br/>{chips}</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("未检出缺陷框。")
+
+    if extra_lines:
+        st.caption(" | ".join(extra_lines))
 
 
 def detections_to_df(detections: list[dict], filename: str | None = None) -> pd.DataFrame:
@@ -277,151 +406,175 @@ def _set_auth_message(message: str, kind: str = "info") -> None:
 
 
 def render_login() -> None:
-    st.title("PCB 缺陷检测系统")
-    st.caption("请先登录后使用检测功能。没有账号可先注册。")
+    _, center, _ = st.columns([1, 1.15, 1])
+    with center:
+        with st.container(border=True):
+            st.title("PCB 缺陷检测系统")
+            st.caption("请先登录后使用检测功能。没有账号可先注册。")
 
-    if not audit().db.enabled:
-        st.error("数据库未连接，无法登录/注册。请检查 MySQL 服务与配置。")
-        blog(
-            audit().log_event(
-                "AUTH_DB_UNAVAILABLE",
-                message="登录页检测到数据库不可用",
-                level="ERROR",
-                db_status=audit().db.status(),
+            if not audit().db.enabled:
+                st.error("数据库未连接，无法登录/注册。请检查 MySQL 服务与配置。")
+                blog(
+                    audit().log_event(
+                        "AUTH_DB_UNAVAILABLE",
+                        message="登录页检测到数据库不可用",
+                        level="ERROR",
+                        db_status=audit().db.status(),
+                    )
+                )
+                return
+
+            _show_auth_message()
+            st.radio(
+                "账号操作",
+                options=["登录", "注册"],
+                horizontal=True,
+                key="auth_panel",
+                label_visibility="collapsed",
             )
-        )
-        return
 
-    _show_auth_message()
-    st.radio(
-        "账号操作",
-        options=["登录", "注册"],
-        horizontal=True,
-        key="auth_panel",
-        label_visibility="collapsed",
-    )
+            if st.session_state.auth_panel == "登录":
+                with st.form("login_form", clear_on_submit=False):
+                    username = st.text_input(
+                        "用户名",
+                        placeholder="请输入用户名",
+                        key="login_username",
+                    )
+                    password = st.text_input(
+                        "密码", type="password", placeholder="请输入密码"
+                    )
+                    purpose = st.text_input(
+                        "本次用途（可选）", placeholder="例如：答辩演示"
+                    )
+                    submitted = st.form_submit_button(
+                        "登录", type="primary", use_container_width=True
+                    )
 
-    if st.session_state.auth_panel == "登录":
-        with st.form("login_form", clear_on_submit=False):
-            username = st.text_input(
-                "用户名",
-                placeholder="请输入用户名",
-                key="login_username",
+                if submitted:
+                    blog(audit().click("登录", username=username.strip()))
+                    ok, message, user = audit().db.authenticate(
+                        username.strip(), password
+                    )
+                    if not ok:
+                        blog(
+                            audit().log_event(
+                                "SESSION_LOGIN_REJECTED",
+                                message=message,
+                                level="WARNING",
+                                username=username.strip(),
+                            )
+                        )
+                        _set_auth_message(message, "error")
+                        st.rerun()
+
+                    display_name = (user or {}).get("display_name") or username.strip()
+                    # 审计 operator 固定用 username，避免显示名变更导致日志查不到
+                    blog(
+                        audit().login(
+                            username.strip(),
+                            purpose=purpose.strip() or None,
+                        )
+                    )
+                    blog(
+                        audit().log_event(
+                            "SESSION_LOGIN_OK",
+                            message="账号密码校验通过",
+                            username=username.strip(),
+                            display_name=display_name,
+                            user_id=(user or {}).get("id"),
+                        )
+                    )
+                    st.session_state.logged_in = True
+                    st.session_state.operator = display_name
+                    st.session_state.username = username.strip()
+                    st.session_state.user_id = (user or {}).get("id")
+                    st.session_state.user_role = (user or {}).get("role") or "user"
+                    st.session_state.auth_message = ""
+                    st.session_state.logger.info(
+                        "UI 登录成功 username=%s role=%s session=%s",
+                        username.strip(),
+                        st.session_state.user_role,
+                        audit().session_id,
+                    )
+                    st.rerun()
+                return
+
+            with st.form("register_form", clear_on_submit=False):
+                reg_username = st.text_input(
+                    "用户名", key="reg_username", placeholder="至少 3 位"
+                )
+                reg_display = st.text_input(
+                    "显示名称（可选）",
+                    key="reg_display",
+                    placeholder="例如：张三",
+                )
+                reg_password = st.text_input(
+                    "密码",
+                    type="password",
+                    key="reg_password",
+                    placeholder="至少 6 位",
+                )
+                reg_password2 = st.text_input(
+                    "确认密码",
+                    type="password",
+                    key="reg_password2",
+                    placeholder="再输入一次密码",
+                )
+                reg_submitted = st.form_submit_button(
+                    "注册",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+            if not reg_submitted:
+                return
+
+            blog(audit().click("注册", username=reg_username.strip()))
+            if reg_password != reg_password2:
+                blog(
+                    audit().log_event(
+                        "USER_REGISTER_REJECTED",
+                        message="两次密码不一致",
+                        level="WARNING",
+                        username=reg_username.strip(),
+                    )
+                )
+                _set_auth_message("两次输入的密码不一致", "error")
+                st.rerun()
+
+            ok, message = audit().db.create_user(
+                username=reg_username.strip(),
+                password=reg_password,
+                display_name=reg_display.strip() or None,
             )
-            password = st.text_input("密码", type="password", placeholder="请输入密码")
-            purpose = st.text_input("本次用途（可选）", placeholder="例如：答辩演示")
-            submitted = st.form_submit_button("登录", type="primary", use_container_width=True)
-
-        if submitted:
-            blog(audit().click("登录", username=username.strip()))
-            ok, message, user = audit().db.authenticate(username.strip(), password)
             if not ok:
                 blog(
                     audit().log_event(
-                        "SESSION_LOGIN_REJECTED",
+                        "USER_REGISTER_REJECTED",
                         message=message,
                         level="WARNING",
-                        username=username.strip(),
+                        username=reg_username.strip(),
                     )
                 )
                 _set_auth_message(message, "error")
                 st.rerun()
 
-            display_name = (user or {}).get("display_name") or username.strip()
-            blog(
-                audit().login(
-                    display_name,
-                    purpose=purpose.strip() or None,
-                )
-            )
             blog(
                 audit().log_event(
-                    "SESSION_LOGIN_OK",
-                    message="账号密码校验通过",
-                    username=username.strip(),
-                    user_id=(user or {}).get("id"),
+                    "USER_REGISTER_OK",
+                    message="注册成功，已切换到登录并预填用户名",
+                    username=reg_username.strip(),
                 )
             )
-            st.session_state.logged_in = True
-            st.session_state.operator = display_name
-            st.session_state.username = username.strip()
-            st.session_state.user_id = (user or {}).get("id")
-            st.session_state.user_role = (user or {}).get("role") or "user"
-            st.session_state.auth_message = ""
-            st.session_state.logger.info(
-                "UI 登录成功 username=%s role=%s session=%s",
-                username.strip(),
-                st.session_state.user_role,
-                audit().session_id,
+            st.session_state.login_username = reg_username.strip()
+            st.session_state.auth_panel = "登录"
+            for key in ("reg_username", "reg_display", "reg_password", "reg_password2"):
+                if key in st.session_state:
+                    del st.session_state[key]
+            _set_auth_message(
+                "注册成功，已为你填好用户名，请输入密码登录", "success"
             )
             st.rerun()
-        return
-
-    with st.form("register_form", clear_on_submit=False):
-        reg_username = st.text_input("用户名", key="reg_username", placeholder="至少 3 位")
-        reg_display = st.text_input("显示名称（可选）", key="reg_display", placeholder="例如：张三")
-        reg_password = st.text_input(
-            "密码",
-            type="password",
-            key="reg_password",
-            placeholder="至少 6 位",
-        )
-        reg_password2 = st.text_input(
-            "确认密码",
-            type="password",
-            key="reg_password2",
-            placeholder="再输入一次密码",
-        )
-        reg_submitted = st.form_submit_button("注册", type="primary", use_container_width=True)
-
-    if not reg_submitted:
-        return
-
-    blog(audit().click("注册", username=reg_username.strip()))
-    if reg_password != reg_password2:
-        blog(
-            audit().log_event(
-                "USER_REGISTER_REJECTED",
-                message="两次密码不一致",
-                level="WARNING",
-                username=reg_username.strip(),
-            )
-        )
-        _set_auth_message("两次输入的密码不一致", "error")
-        st.rerun()
-
-    ok, message = audit().db.create_user(
-        username=reg_username.strip(),
-        password=reg_password,
-        display_name=reg_display.strip() or None,
-    )
-    if not ok:
-        blog(
-            audit().log_event(
-                "USER_REGISTER_REJECTED",
-                message=message,
-                level="WARNING",
-                username=reg_username.strip(),
-            )
-        )
-        _set_auth_message(message, "error")
-        st.rerun()
-
-    blog(
-        audit().log_event(
-            "USER_REGISTER_OK",
-            message="注册成功，已切换到登录并预填用户名",
-            username=reg_username.strip(),
-        )
-    )
-    st.session_state.login_username = reg_username.strip()
-    st.session_state.auth_panel = "登录"
-    # 清掉注册表单，避免残留
-    for key in ("reg_username", "reg_display", "reg_password", "reg_password2"):
-        if key in st.session_state:
-            del st.session_state[key]
-    _set_auth_message("注册成功，已为你填好用户名，请输入密码登录", "success")
-    st.rerun()
 
 
 def track_setting_changes(model_name: str, conf: float, iou: float) -> None:
@@ -570,14 +723,16 @@ def render_sidebar():
         st.session_state.login_username = ""
         st.session_state.auth_panel = "登录"
         _set_auth_message("已退出登录", "info")
-        st.session_state.audit = UIAuditLogger(LOG_DIR)
-        st.session_state.audit.bind_streamlit_session(_streamlit_session_id())
+        # 清掉旧实例，让 audit() 用最新模块重建
+        st.session_state.pop("audit", None)
+        logger_obj = audit()
+        logger_obj.bind_streamlit_session(_streamlit_session_id())
         try:
-            st.session_state.audit.db.ensure_users_table()
+            logger_obj.db.ensure_users_table()
         except Exception:
             pass
         blog(
-            st.session_state.audit.session_open(
+            logger_obj.session_open(
                 page="PCB缺陷检测系统",
                 client_info={"after_logout": True},
             )
@@ -618,11 +773,28 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             )
             st.session_state.last_single_upload = upload.name
 
+        compare_mode = st.checkbox(
+            "同图阈值对比（左右两个 conf）",
+            value=False,
+            key="single_compare_mode",
+        )
+        conf_b = conf
+        if compare_mode:
+            conf_b = st.slider(
+                "对比阈值 conf_b",
+                0.05,
+                0.95,
+                min(0.50, max(0.05, conf + 0.25)),
+                0.01,
+                key="single_compare_conf",
+            )
+            st.caption(f"将对比 conf={conf:.2f} 与 conf={conf_b:.2f}")
+
         run = st.button("开始单图检测", type="primary", use_container_width=True)
 
     if not run:
         with right:
-            st.info("上传图片后点击检测，右侧显示画框结果。")
+            st.info("上传图片后点击检测，右侧显示画框结果。开启对比后可左右查看不同阈值。")
         return
 
     blog(
@@ -630,6 +802,8 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             "开始单图检测",
             model_name=model_name,
             conf=conf,
+            conf_b=conf_b if compare_mode else None,
+            compare_mode=compare_mode,
             iou=iou,
             has_upload=upload is not None,
             sample_name=sample_name,
@@ -656,23 +830,48 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             return
 
         imgsz = MODEL_OPTIONS[model_name]["imgsz"]
-        blog(
-            audit().file_process_start(
-                mode="single",
-                file_name=src.name,
-                file_path=str(src),
-                model_name=model_name,
-                conf=conf,
-                iou=iou,
-                imgsz=imgsz,
-                source_type=source_type,
+
+        def _run_one(conf_value: float, tag: str) -> tuple[dict, Path]:
+            blog(
+                audit().file_process_start(
+                    mode="single",
+                    file_name=src.name,
+                    file_path=str(src),
+                    model_name=model_name,
+                    conf=conf_value,
+                    iou=iou,
+                    imgsz=imgsz,
+                    source_type=source_type,
+                )
             )
-        )
+            engine = ensure_engine(model_name, conf_value, iou)
+            save_path = work / f"annotated_{tag}_{src.name}"
+            result = engine.detect_one(src, save_path=save_path)
+            blog(
+                audit().file_process_result(
+                    mode="single",
+                    file_name=src.name,
+                    status="ok",
+                    detections=result["detections"],
+                    predict_call_ms=result["predict_call_ms"],
+                    total_ms=result["total_ms"],
+                    annotated_image=str(save_path),
+                    extra={
+                        "output_dir": str(work),
+                        "source_type": source_type,
+                        "conf": conf_value,
+                        "compare_tag": tag,
+                    },
+                )
+            )
+            return result, save_path
 
         with st.spinner("检测中，首次加载模型可能较慢..."):
-            engine = ensure_engine(model_name, conf, iou)
-            save_path = work / f"annotated_{src.name}"
-            result = engine.detect_one(src, save_path=save_path)
+            result_a, path_a = _run_one(conf, "a")
+            result_b = None
+            path_b = None
+            if compare_mode:
+                result_b, path_b = _run_one(conf_b, "b")
 
         summary = {
             "session_id": audit().session_id,
@@ -680,43 +879,53 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             "model": model_name,
             "source": str(src),
             "source_type": source_type,
-            "predict_call_ms": result["predict_call_ms"],
-            "total_ms": result["total_ms"],
-            "detections": result["detections"],
-            "thresholds": result["thresholds"],
+            "compare_mode": compare_mode,
+            "result_a": {
+                "conf": conf,
+                "predict_call_ms": result_a["predict_call_ms"],
+                "total_ms": result_a["total_ms"],
+                "detections": result_a["detections"],
+            },
         }
+        if compare_mode and result_b is not None:
+            summary["result_b"] = {
+                "conf": conf_b,
+                "predict_call_ms": result_b["predict_call_ms"],
+                "total_ms": result_b["total_ms"],
+                "detections": result_b["detections"],
+            }
         json_path = work / "result.json"
         json_path.write_text(
             json.dumps(summary, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
-        blog(
-            audit().file_process_result(
-                mode="single",
-                file_name=src.name,
-                status="ok",
-                detections=result["detections"],
-                predict_call_ms=result["predict_call_ms"],
-                total_ms=result["total_ms"],
-                annotated_image=str(save_path),
-                result_json=str(json_path),
-                extra={"output_dir": str(work), "source_type": source_type},
+        # 对比模式占满整行，避免塞在右侧半栏里再拆两列
+        if compare_mode and result_b is not None and path_b is not None:
+            st.markdown("#### 阈值对比结果")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown(f"**阈值 A：conf={conf:.2f}**")
+                st.image(bgr_to_rgb(path_a), use_container_width=True)
+                render_timing_metrics(
+                    box_count=len(result_a["detections"]),
+                    predict_ms=float(result_a["predict_call_ms"]),
+                    total_ms=float(result_a["total_ms"]),
+                    class_counter=count_classes(result_a["detections"]),
+                )
+            with col_b:
+                st.markdown(f"**阈值 B：conf={conf_b:.2f}**")
+                st.image(bgr_to_rgb(path_b), use_container_width=True)
+                render_timing_metrics(
+                    box_count=len(result_b["detections"]),
+                    predict_ms=float(result_b["predict_call_ms"]),
+                    total_ms=float(result_b["total_ms"]),
+                    class_counter=count_classes(result_b["detections"]),
+                )
+            st.caption(
+                f"对比结论：A 检出 {len(result_a['detections'])} 框，"
+                f"B 检出 {len(result_b['detections'])} 框"
             )
-        )
-
-        with right:
-            st.image(bgr_to_rgb(save_path), caption="检测结果（画框）", use_container_width=True)
-            st.markdown(
-                f"<div class='metric-box'>"
-                f"检测框：<b>{len(result['detections'])}</b> 个<br/>"
-                f"推理耗时：<b>{result['predict_call_ms']} ms</b><br/>"
-                f"总耗时：<b>{result['total_ms']} ms</b><br/>"
-                f"结果目录：<code>{work}</code>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            st.dataframe(detections_to_df(result["detections"]), use_container_width=True)
             if st.download_button(
                 "下载 result.json",
                 data=json_path.read_text(encoding="utf-8"),
@@ -724,8 +933,46 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
                 mime="application/json",
             ):
                 blog(
-                    audit().click("下载result.json", file_name=src.name, path=str(json_path))
+                    audit().click(
+                        "下载result.json", file_name=src.name, path=str(json_path)
+                    )
                 )
+        else:
+            with right:
+                st.image(
+                    bgr_to_rgb(path_a),
+                    caption="检测结果（画框）",
+                    use_container_width=True,
+                )
+                render_timing_metrics(
+                    box_count=len(result_a["detections"]),
+                    predict_ms=float(result_a["predict_call_ms"]),
+                    total_ms=float(result_a["total_ms"]),
+                    class_counter=count_classes(result_a["detections"]),
+                    extra_lines=[
+                        f"模型：{model_name}",
+                        f"conf={conf:.2f}",
+                        f"iou={iou:.2f}",
+                        f"目录：{work.name}",
+                    ],
+                )
+                st.dataframe(
+                    detections_to_df(result_a["detections"]),
+                    use_container_width=True,
+                )
+                if st.download_button(
+                    "下载 result.json",
+                    data=json_path.read_text(encoding="utf-8"),
+                    file_name="result.json",
+                    mime="application/json",
+                ):
+                    blog(
+                        audit().click(
+                            "下载result.json",
+                            file_name=src.name,
+                            path=str(json_path),
+                        )
+                    )
     except Exception as exc:
         blog(
             audit().file_process_result(
@@ -902,14 +1149,26 @@ def render_batch_tab(model_name: str, conf: float, iou: float) -> None:
             )
         )
 
-        st.markdown(
-            f"<div class='metric-box'>"
-            f"成功：<b>{success}</b> 张 | 失败：<b>{failure}</b> 张<br/>"
-            f"平均推理：<b>{avg_ms:.2f} ms/张</b><br/>"
-            f"估算 FPS：<b>{fps:.2f}</b><br/>"
-            f"结果目录：<code>{work}</code>"
-            f"</div>",
-            unsafe_allow_html=True,
+        batch_class_counter: dict[str, int] = {}
+        if not df.empty and "class_name" in df.columns:
+            for name, cnt in df["class_name"].value_counts().items():
+                batch_class_counter[str(name)] = int(cnt)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("成功 / 失败", f"{success} / {failure}")
+        m2.metric("平均推理", f"{avg_ms:.1f} ms")
+        m3.metric("估算 FPS", f"{fps:.2f}")
+        m4.metric("总检出框", f"{int(df.shape[0]) if not df.empty else 0}")
+        if batch_class_counter:
+            chips = " · ".join(
+                f"**{name}** × {cnt}" for name, cnt in batch_class_counter.items()
+            )
+            st.markdown(
+                f"<div class='metric-box'><b>类别统计</b><br/>{chips}</div>",
+                unsafe_allow_html=True,
+            )
+        st.caption(
+            f"模型：{model_name} | conf={conf:.2f} | 目录：{work.name}"
         )
         if gallery:
             st.image(gallery, caption=[f"结果 {i+1}" for i in range(len(gallery))], width=320)
@@ -1006,6 +1265,52 @@ def _try_register_disconnect_close() -> None:
         st.session_state._disconnect_hooked = True
 
 
+def render_recent_log_summary() -> None:
+    """验收用：只展示当前用户最近几条后台日志摘要。"""
+    with st.expander("我的最近操作摘要（验收日志）", expanded=False):
+        try:
+            db = audit().db
+            operator_key = st.session_state.username or st.session_state.operator
+            if _db_supports_also_match(db):
+                events = db.recent_events_for_operator(
+                    operator_key,
+                    limit=15,
+                    also_match=[st.session_state.operator, st.session_state.username],
+                )
+            else:
+                events = db.recent_events_for_operator(operator_key, limit=15)
+        except Exception as exc:
+            st.warning("暂时无法读取操作摘要，请退出后重新登录再试。")
+            blog(
+                audit().log_event(
+                    "RECENT_LOG_SUMMARY_ERROR",
+                    message=str(exc),
+                    level="ERROR",
+                )
+            )
+            return
+
+        if not events:
+            st.caption("暂无记录。完成登录/检测后会在这里显示。")
+            return
+        rows = []
+        for item in events:
+            created = item.get("created_at")
+            if hasattr(created, "strftime"):
+                created = created.strftime("%Y-%m-%d %H:%M:%S")
+            rows.append(
+                {
+                    "时间": created,
+                    "事件": item.get("event_type"),
+                    "动作": item.get("action") or "-",
+                    "说明": item.get("message") or "-",
+                    "级别": item.get("level") or "INFO",
+                }
+            )
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.caption("完整明细在 MySQL / logs，不在页面刷屏展示。")
+
+
 def main() -> None:
     setup_page()
     init_state()
@@ -1042,6 +1347,8 @@ def main() -> None:
         render_single_tab(model_name, conf, iou)
     else:
         render_batch_tab(model_name, conf, iou)
+
+    render_recent_log_summary()
 
     _try_register_disconnect_close()
     audit().heartbeat(
