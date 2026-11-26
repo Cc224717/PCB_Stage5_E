@@ -2,6 +2,7 @@
 PCB UI 审计日志：记录会话开闭、登录、点击、处理文件与检测结果。
 
 输出：
+- MySQL pcb_defect（sessions / audit_events / detect_jobs / detections）
 - logs/ui_audit.log      人类可读全文日志
 - logs/ui_audit.jsonl    结构化事件（每行一条 JSON）
 - logs/sessions/<id>.jsonl  单会话明细
@@ -19,6 +20,8 @@ from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any
+
+from db import Database
 
 
 LOGGER_NAME = "pcb_ui_audit"
@@ -86,6 +89,7 @@ class UIAuditLogger:
         self.jsonl_path = self.log_dir / "ui_audit.jsonl"
         self.sessions_dir = self.log_dir / "sessions"
         self.active_dir = self.sessions_dir / "active"
+        self.db = Database()
 
         self.session_id = uuid.uuid4().hex[:12]
         self.streamlit_session_id = ""
@@ -95,6 +99,15 @@ class UIAuditLogger:
         self.click_count = 0
         self.file_count = 0
         self.session_file = self.sessions_dir / f"{self.session_id}.jsonl"
+        self._pending_job_meta: dict[str, Any] = {}
+
+        if not self.db.enabled:
+            self.logger.warning(
+                "MySQL 未启用或连接失败，仅写文件日志。详情=%s",
+                self.db.status(),
+            )
+        else:
+            self.logger.info("MySQL 已连接 database=%s", self.db.status().get("database"))
 
         self._close_stale_sessions()
 
@@ -206,28 +219,78 @@ class UIAuditLogger:
 
         self._write_jsonl(self.jsonl_path, payload)
         self._write_jsonl(self.session_file, payload)
+        self._db_insert_event(event=event, message=message, level=level, fields=fields)
         if not self.closed:
             self._touch_active()
+            try:
+                self.db.touch_session_counts(
+                    session_id=self.session_id,
+                    click_count=self.click_count,
+                    file_count=self.file_count,
+                    operator=self.operator,
+                )
+            except Exception as exc:
+                self.logger.error("MySQL 更新会话计数失败: %s", exc)
         return f"{_now()} | {level.upper()} | {line}"
+
+    def _db_insert_event(
+        self,
+        *,
+        event: str,
+        message: str,
+        level: str,
+        fields: dict[str, Any],
+    ) -> None:
+        try:
+            self.db.insert_event(
+                session_id=self.session_id,
+                operator=self.operator,
+                event_type=event,
+                message=message,
+                action=fields.get("action"),
+                level=level.upper(),
+                payload=fields,
+            )
+        except Exception as exc:
+            self.logger.error("MySQL 写入 audit_events 失败: %s", exc)
 
     def session_open(self, page: str = "ui_app", client_info: dict[str, Any] | None = None) -> str:
         self.opened_at = _now_iso()
         self.closed = False
         self._touch_active({"page": page})
+        try:
+            self.db.upsert_session_open(
+                session_id=self.session_id,
+                streamlit_session_id=self.streamlit_session_id,
+                operator=self.operator,
+                opened_at=self.opened_at,
+            )
+        except Exception as exc:
+            self.logger.error("MySQL 写入 sessions(open) 失败: %s", exc)
         return self.log_event(
             "SESSION_OPEN",
             message="用户打开页面，会话开始",
             page=page,
             opened_at=self.opened_at,
             client_info=client_info or {},
+            mysql=self.db.status(),
         )
 
-    def login(self, operator: str) -> str:
+    def login(self, operator: str, purpose: str | None = None) -> str:
         self.operator = (operator or "").strip() or "匿名用户"
+        try:
+            self.db.update_session_login(
+                session_id=self.session_id,
+                operator=self.operator,
+                purpose=purpose,
+            )
+        except Exception as exc:
+            self.logger.error("MySQL 更新登录信息失败: %s", exc)
         return self.log_event(
             "SESSION_LOGIN",
             message="用户登录系统",
             operator_name=self.operator,
+            purpose=purpose,
             login_at=_now_iso(),
         )
 
@@ -239,6 +302,16 @@ class UIAuditLogger:
             return f"{_now()} | INFO | event=SESSION_CLOSE | already_closed"
         self.closed = True
         closed_at = _now_iso()
+        try:
+            self.db.close_session(
+                session_id=self.session_id,
+                close_reason=reason,
+                closed_at=closed_at,
+                click_count=self.click_count,
+                file_count=self.file_count,
+            )
+        except Exception as exc:
+            self.logger.error("MySQL 关闭会话失败: %s", exc)
         line = self.log_event(
             "SESSION_CLOSE",
             message="用户关闭/退出页面，会话结束",
@@ -285,6 +358,16 @@ class UIAuditLogger:
         source_type: str,
     ) -> str:
         self.file_count += 1
+        self._pending_job_meta = {
+            "mode": mode,
+            "file_name": file_name,
+            "file_path": file_path,
+            "model_name": model_name,
+            "conf": conf,
+            "iou": iou,
+            "imgsz": imgsz,
+            "source_type": source_type,
+        }
         return self.log_event(
             "FILE_PROCESS_START",
             message=f"开始处理文件: {file_name}",
@@ -335,6 +418,34 @@ class UIAuditLogger:
             fields["error"] = error
         if extra:
             fields.update(extra)
+
+        meta = self._pending_job_meta if self._pending_job_meta.get("file_name") == file_name else {}
+        try:
+            job_id = self.db.insert_detect_result(
+                session_id=self.session_id,
+                operator=self.operator,
+                mode=mode,
+                file_name=file_name,
+                status=status,
+                file_path=meta.get("file_path") or fields.get("file_path"),
+                source_type=meta.get("source_type") or fields.get("source_type"),
+                model_name=meta.get("model_name") or fields.get("model_name"),
+                conf=meta.get("conf"),
+                iou=meta.get("iou"),
+                imgsz=meta.get("imgsz"),
+                detections=detections,
+                class_counter=class_counter,
+                predict_call_ms=predict_call_ms,
+                total_ms=total_ms,
+                annotated_image=annotated_image,
+                result_json=result_json,
+                output_dir=(extra or {}).get("output_dir"),
+                error_message=error,
+            )
+            fields["mysql_job_id"] = job_id
+        except Exception as exc:
+            self.logger.error("MySQL 写入 detect_jobs/detections 失败: %s", exc)
+            fields["mysql_error"] = str(exc)
 
         level = "ERROR" if status != "ok" else "INFO"
         return self.log_event(

@@ -87,8 +87,9 @@ def _streamlit_session_id() -> str:
     return ""
 
 
-def append_ui_line(line: str) -> None:
-    st.session_state.log_lines.append(line)
+def blog(_line: str | None = None) -> None:
+    """后台日志已由 audit/MySQL 写入，页面不展示明细。"""
+    return None
 
 
 def audit() -> UIAuditLogger:
@@ -98,8 +99,6 @@ def audit() -> UIAuditLogger:
 def init_state() -> None:
     if "logger" not in st.session_state:
         st.session_state.logger = setup_logging(LOG_DIR)
-    if "log_lines" not in st.session_state:
-        st.session_state.log_lines = []
     if "engine" not in st.session_state:
         st.session_state.engine = None
     if "model_name" not in st.session_state:
@@ -108,6 +107,12 @@ def init_state() -> None:
         st.session_state.logged_in = False
     if "operator" not in st.session_state:
         st.session_state.operator = ""
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = None
+    if "auth_message" not in st.session_state:
+        st.session_state.auth_message = ""
+    if "auth_message_type" not in st.session_state:
+        st.session_state.auth_message_type = "info"
     if "prev_model" not in st.session_state:
         st.session_state.prev_model = "高精度 (high_accuracy)"
     if "prev_conf" not in st.session_state:
@@ -124,11 +129,14 @@ def init_state() -> None:
     if "audit" not in st.session_state:
         st.session_state.audit = UIAuditLogger(LOG_DIR)
         st.session_state.audit.bind_streamlit_session(_streamlit_session_id())
-        line = st.session_state.audit.session_open(
+        try:
+            st.session_state.audit.db.ensure_users_table()
+        except Exception as exc:
+            st.session_state.logger.error("初始化 users 表失败: %s", exc)
+        st.session_state.audit.session_open(
             page="PCB缺陷检测系统",
             client_info={"streamlit_session_id": _streamlit_session_id()},
         )
-        append_ui_line(line)
         st.session_state.logger.info("UI 会话打开 session=%s", st.session_state.audit.session_id)
 
 
@@ -149,7 +157,7 @@ def ensure_engine(model_name: str, conf: float, iou: float) -> InferenceEngine:
             weights=str(info["weights"]),
             imgsz=info["imgsz"],
         )
-        append_ui_line(line)
+        blog(line)
         st.session_state.engine = InferenceEngine(
             weights=info["weights"],
             device="cpu",
@@ -165,7 +173,7 @@ def ensure_engine(model_name: str, conf: float, iou: float) -> InferenceEngine:
             imgsz=info["imgsz"],
             note=info["note"],
         )
-        append_ui_line(line)
+        blog(line)
     else:
         old = st.session_state.engine.get_thresholds()
         st.session_state.engine.set_thresholds(conf=conf, iou=iou)
@@ -179,7 +187,7 @@ def ensure_engine(model_name: str, conf: float, iou: float) -> InferenceEngine:
                 conf=conf,
                 iou=iou,
             )
-            append_ui_line(line)
+            blog(line)
 
     return st.session_state.engine
 
@@ -239,67 +247,166 @@ def list_sample_images() -> list[Path]:
     return [p for p in paths if p.suffix.lower() in IMAGE_EXTS]
 
 
+def _show_auth_message() -> None:
+    msg = st.session_state.get("auth_message", "")
+    if not msg:
+        return
+    kind = st.session_state.get("auth_message_type", "info")
+    if kind == "error":
+        st.error(msg)
+    elif kind == "success":
+        st.success(msg)
+    elif kind == "warning":
+        st.warning(msg)
+    else:
+        st.info(msg)
+
+
+def _set_auth_message(message: str, kind: str = "info") -> None:
+    st.session_state.auth_message = message
+    st.session_state.auth_message_type = kind
+
+
 def render_login() -> None:
     st.title("PCB 缺陷检测系统")
-    st.caption("请先登录后再进入检测界面。每次打开到关闭都会写入完整审计日志。")
+    st.caption("请先登录后使用检测功能。没有账号可先注册。")
 
-    with st.form("login_form", clear_on_submit=False):
-        operator = st.text_input("操作员姓名 / 工号", placeholder="例如：张三 / E01")
-        note = st.text_input("本次用途（可选）", placeholder="例如：答辩演示 / 联调")
-        submitted = st.form_submit_button("登录进入系统", type="primary", use_container_width=True)
-
-    if submitted:
-        if not operator.strip():
-            st.warning("请填写操作员姓名或工号。")
-            append_ui_line(
-                audit().log_event(
-                    "SESSION_LOGIN_REJECTED",
-                    message="登录失败：未填写操作员",
-                    level="WARNING",
-                )
+    if not audit().db.enabled:
+        st.error("数据库未连接，无法登录/注册。请检查 MySQL 服务与配置。")
+        blog(
+            audit().log_event(
+                "AUTH_DB_UNAVAILABLE",
+                message="登录页检测到数据库不可用",
+                level="ERROR",
+                db_status=audit().db.status(),
             )
-            return
-
-        append_ui_line(audit().click("登录进入系统", note=note.strip() or None))
-        line = audit().login(operator.strip())
-        append_ui_line(line)
-        if note.strip():
-            append_ui_line(
-                audit().log_event(
-                    "SESSION_PURPOSE",
-                    message="记录本次用途",
-                    purpose=note.strip(),
-                )
-            )
-        st.session_state.logged_in = True
-        st.session_state.operator = operator.strip()
-        st.session_state.logger.info(
-            "UI 登录 operator=%s session=%s",
-            operator.strip(),
-            audit().session_id,
         )
-        st.rerun()
+        return
 
-    st.info(
-        f"当前页面会话已创建：`{audit().session_id}`（打开时间已记入日志，"
-        "登录后开始记录操作明细）"
-    )
-    st.code("\n".join(st.session_state.log_lines[-50:]) or "暂无日志", language="text")
+    _show_auth_message()
+    tab_login, tab_register = st.tabs(["登录", "注册"])
+
+    with tab_login:
+        with st.form("login_form", clear_on_submit=False):
+            username = st.text_input("用户名", placeholder="请输入用户名")
+            password = st.text_input("密码", type="password", placeholder="请输入密码")
+            purpose = st.text_input("本次用途（可选）", placeholder="例如：答辩演示")
+            submitted = st.form_submit_button("登录", type="primary", use_container_width=True)
+
+        if submitted:
+            blog(audit().click("登录", username=username.strip()))
+            ok, message, user = audit().db.authenticate(username.strip(), password)
+            if not ok:
+                blog(
+                    audit().log_event(
+                        "SESSION_LOGIN_REJECTED",
+                        message=message,
+                        level="WARNING",
+                        username=username.strip(),
+                    )
+                )
+                _set_auth_message(message, "error")
+                st.rerun()
+
+            display_name = (user or {}).get("display_name") or username.strip()
+            blog(
+                audit().login(
+                    display_name,
+                    purpose=purpose.strip() or None,
+                )
+            )
+            blog(
+                audit().log_event(
+                    "SESSION_LOGIN_OK",
+                    message="账号密码校验通过",
+                    username=username.strip(),
+                    user_id=(user or {}).get("id"),
+                )
+            )
+            st.session_state.logged_in = True
+            st.session_state.operator = display_name
+            st.session_state.user_id = (user or {}).get("id")
+            st.session_state.auth_message = ""
+            st.session_state.logger.info(
+                "UI 登录成功 username=%s session=%s",
+                username.strip(),
+                audit().session_id,
+            )
+            st.rerun()
+
+    with tab_register:
+        with st.form("register_form", clear_on_submit=False):
+            reg_username = st.text_input("用户名", key="reg_username", placeholder="至少 3 位")
+            reg_display = st.text_input("显示名称（可选）", key="reg_display", placeholder="例如：张三")
+            reg_password = st.text_input(
+                "密码",
+                type="password",
+                key="reg_password",
+                placeholder="至少 6 位",
+            )
+            reg_password2 = st.text_input(
+                "确认密码",
+                type="password",
+                key="reg_password2",
+                placeholder="再输入一次密码",
+            )
+            reg_submitted = st.form_submit_button("注册", type="primary", use_container_width=True)
+
+        if reg_submitted:
+            blog(audit().click("注册", username=reg_username.strip()))
+            if reg_password != reg_password2:
+                blog(
+                    audit().log_event(
+                        "USER_REGISTER_REJECTED",
+                        message="两次密码不一致",
+                        level="WARNING",
+                        username=reg_username.strip(),
+                    )
+                )
+                _set_auth_message("两次输入的密码不一致", "error")
+                st.rerun()
+
+            ok, message = audit().db.create_user(
+                username=reg_username.strip(),
+                password=reg_password,
+                display_name=reg_display.strip() or None,
+            )
+            if not ok:
+                blog(
+                    audit().log_event(
+                        "USER_REGISTER_REJECTED",
+                        message=message,
+                        level="WARNING",
+                        username=reg_username.strip(),
+                    )
+                )
+                _set_auth_message(message, "error")
+                st.rerun()
+
+            blog(
+                audit().log_event(
+                    "USER_REGISTER_OK",
+                    message="注册成功",
+                    username=reg_username.strip(),
+                )
+            )
+            _set_auth_message("注册成功，请使用新账号登录", "success")
+            st.rerun()
 
 
 def track_setting_changes(model_name: str, conf: float, iou: float) -> None:
     if model_name != st.session_state.prev_model:
-        append_ui_line(
+        blog(
             audit().setting_change("model", st.session_state.prev_model, model_name)
         )
         st.session_state.prev_model = model_name
     if abs(conf - st.session_state.prev_conf) > 1e-9:
-        append_ui_line(
+        blog(
             audit().setting_change("conf", st.session_state.prev_conf, conf)
         )
         st.session_state.prev_conf = conf
     if abs(iou - st.session_state.prev_iou) > 1e-9:
-        append_ui_line(
+        blog(
             audit().setting_change("iou", st.session_state.prev_iou, iou)
         )
         st.session_state.prev_iou = iou
@@ -307,10 +414,7 @@ def track_setting_changes(model_name: str, conf: float, iou: float) -> None:
 
 def render_sidebar():
     st.sidebar.header("检测设置")
-    st.sidebar.markdown(
-        f"**操作员**：{st.session_state.operator}  \n"
-        f"**会话 ID**：`{audit().session_id}`"
-    )
+    st.sidebar.markdown(f"**当前用户**：{st.session_state.operator}")
 
     model_name = st.sidebar.selectbox(
         "模型切换",
@@ -331,7 +435,7 @@ def render_sidebar():
     )
 
     if st.sidebar.button("加载 / 切换模型", use_container_width=True):
-        append_ui_line(
+        blog(
             audit().click(
                 "加载/切换模型",
                 model_name=model_name,
@@ -344,13 +448,12 @@ def render_sidebar():
                 ensure_engine(model_name, conf, iou)
                 st.sidebar.success("模型已就绪")
             except Exception as exc:
-                append_ui_line(audit().error(f"模型切换失败: {exc}", traceback=traceback.format_exc()))
+                blog(audit().error(f"模型切换失败: {exc}", traceback=traceback.format_exc()))
                 st.sidebar.error(f"加载失败：{exc}")
 
-    if st.sidebar.button("结束会话 / 退出", use_container_width=True):
-        append_ui_line(audit().click("结束会话/退出"))
-        line = audit().logout(reason="user_logout_button")
-        append_ui_line(line)
+    if st.sidebar.button("退出登录", use_container_width=True):
+        blog(audit().click("退出登录"))
+        blog(audit().logout(reason="user_logout_button"))
         st.session_state.logger.info(
             "UI 退出 operator=%s session=%s",
             st.session_state.operator,
@@ -358,10 +461,15 @@ def render_sidebar():
         )
         st.session_state.logged_in = False
         st.session_state.operator = ""
-        # 新开一轮审计会话，便于下次登录继续记
+        st.session_state.user_id = None
+        _set_auth_message("已退出登录", "info")
         st.session_state.audit = UIAuditLogger(LOG_DIR)
         st.session_state.audit.bind_streamlit_session(_streamlit_session_id())
-        append_ui_line(
+        try:
+            st.session_state.audit.db.ensure_users_table()
+        except Exception:
+            pass
+        blog(
             st.session_state.audit.session_open(
                 page="PCB缺陷检测系统",
                 client_info={"after_logout": True},
@@ -388,13 +496,13 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             key="single_sample",
         )
         if sample_name != st.session_state.prev_sample:
-            append_ui_line(
+            blog(
                 audit().setting_change("sample_image", st.session_state.prev_sample, sample_name)
             )
             st.session_state.prev_sample = sample_name
 
         if upload is not None and st.session_state.get("last_single_upload") != upload.name:
-            append_ui_line(
+            blog(
                 audit().click(
                     "上传单图",
                     file_name=upload.name,
@@ -410,7 +518,7 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             st.info("上传图片后点击检测，右侧显示画框结果。")
         return
 
-    append_ui_line(
+    blog(
         audit().click(
             "开始单图检测",
             model_name=model_name,
@@ -430,7 +538,7 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             src = next(p for p in samples if p.name == sample_name)
             source_type = "sample"
         else:
-            append_ui_line(
+            blog(
                 audit().log_event(
                     "FILE_PROCESS_SKIP",
                     message="单图检测取消：未选择图片",
@@ -441,7 +549,7 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             return
 
         imgsz = MODEL_OPTIONS[model_name]["imgsz"]
-        append_ui_line(
+        blog(
             audit().file_process_start(
                 mode="single",
                 file_name=src.name,
@@ -476,7 +584,7 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             encoding="utf-8",
         )
 
-        append_ui_line(
+        blog(
             audit().file_process_result(
                 mode="single",
                 file_name=src.name,
@@ -508,11 +616,11 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
                 file_name="result.json",
                 mime="application/json",
             ):
-                append_ui_line(
+                blog(
                     audit().click("下载result.json", file_name=src.name, path=str(json_path))
                 )
     except Exception as exc:
-        append_ui_line(
+        blog(
             audit().file_process_result(
                 mode="single",
                 file_name=str(getattr(upload, "name", sample_name)),
@@ -533,7 +641,7 @@ def render_batch_tab(model_name: str, conf: float, iou: float) -> None:
     )
     upload_names = tuple(sorted(f.name for f in uploads)) if uploads else tuple()
     if upload_names and st.session_state.get("last_batch_uploads") != upload_names:
-        append_ui_line(
+        blog(
             audit().click(
                 "上传批量图片",
                 file_count=len(upload_names),
@@ -548,7 +656,7 @@ def render_batch_tab(model_name: str, conf: float, iou: float) -> None:
         st.info("可一次选择多张图；完成后可下载 JSON / CSV。")
         return
 
-    append_ui_line(
+    blog(
         audit().click(
             "开始批量检测",
             model_name=model_name,
@@ -559,7 +667,7 @@ def render_batch_tab(model_name: str, conf: float, iou: float) -> None:
     )
 
     if not uploads:
-        append_ui_line(
+        blog(
             audit().log_event(
                 "FILE_PROCESS_SKIP",
                 message="批量检测取消：未上传图片",
@@ -590,7 +698,7 @@ def render_batch_tab(model_name: str, conf: float, iou: float) -> None:
         for index, upload in enumerate(uploads, start=1):
             src = save_upload_to_temp(upload, input_dir)
             processed_files.append(src.name)
-            append_ui_line(
+            blog(
                 audit().file_process_start(
                     mode="batch",
                     file_name=src.name,
@@ -613,7 +721,7 @@ def render_batch_tab(model_name: str, conf: float, iou: float) -> None:
                 if not df_part.empty:
                     df_part["predict_ms"] = result["predict_call_ms"]
                     rows.append(df_part)
-                append_ui_line(
+                blog(
                     audit().file_process_result(
                         mode="batch",
                         file_name=src.name,
@@ -628,7 +736,7 @@ def render_batch_tab(model_name: str, conf: float, iou: float) -> None:
             except Exception as exc:
                 failure += 1
                 payload.append({"file": str(src), "status": "error", "error": str(exc)})
-                append_ui_line(
+                blog(
                     audit().file_process_result(
                         mode="batch",
                         file_name=src.name,
@@ -674,7 +782,7 @@ def render_batch_tab(model_name: str, conf: float, iou: float) -> None:
 
         avg_ms = (total_predict_ms / success) if success else 0.0
         fps = (1000.0 / avg_ms) if avg_ms > 0 else 0.0
-        append_ui_line(
+        blog(
             audit().batch_summary(
                 success=success,
                 failure=failure,
@@ -707,7 +815,7 @@ def render_batch_tab(model_name: str, conf: float, iou: float) -> None:
                 file_name="results.json",
                 mime="application/json",
             ):
-                append_ui_line(audit().click("下载results.json", path=str(json_path)))
+                blog(audit().click("下载results.json", path=str(json_path)))
         with c2:
             if st.download_button(
                 "下载 results.csv",
@@ -715,9 +823,9 @@ def render_batch_tab(model_name: str, conf: float, iou: float) -> None:
                 file_name="results.csv",
                 mime="text/csv",
             ):
-                append_ui_line(audit().click("下载results.csv", path=str(csv_path)))
+                blog(audit().click("下载results.csv", path=str(csv_path)))
     except Exception as exc:
-        append_ui_line(
+        blog(
             audit().error(
                 f"批量检测失败: {exc}",
                 traceback=traceback.format_exc(),
@@ -772,7 +880,7 @@ def _try_register_disconnect_close() -> None:
             if hasattr(session_obj, "on_session_ended"):
                 session_obj.on_session_ended(_on_ended)
                 st.session_state._disconnect_hooked = True
-                append_ui_line(
+                blog(
                     audit().log_event(
                         "SESSION_HOOK",
                         message="已注册浏览器断开关闭钩子",
@@ -781,7 +889,7 @@ def _try_register_disconnect_close() -> None:
                 )
                 return
     except Exception as exc:
-        append_ui_line(
+        blog(
             audit().log_event(
                 "SESSION_HOOK",
                 message=f"注册断开钩子失败（将依赖退出按钮/超时关闭）: {exc}",
@@ -802,11 +910,8 @@ def main() -> None:
         audit().heartbeat({"page": "login"})
         return
 
-    st.title("PCB 缺陷检测系统（简易版）")
-    st.caption(
-        f"操作员：{st.session_state.operator} · 会话：{audit().session_id} · "
-        "单图/批量 · 模型切换 · 阈值调节 · 全量审计日志 · 结果导出"
-    )
+    st.title("PCB 缺陷检测系统")
+    st.caption(f"当前用户：{st.session_state.operator} · 单图/批量检测 · 模型切换 · 阈值调节 · 结果导出")
 
     model_name, conf, iou = render_sidebar()
 
@@ -817,7 +922,7 @@ def main() -> None:
         key="main_mode",
     )
     if mode != st.session_state.prev_tab:
-        append_ui_line(
+        blog(
             audit().click(
                 "切换功能页签",
                 from_tab=st.session_state.prev_tab,
@@ -843,13 +948,7 @@ def main() -> None:
         }
     )
 
-    st.subheader("运行日志（界面）")
-    st.caption(
-        "完整审计文件：`logs/ui_audit.log`、`logs/ui_audit.jsonl`、"
-        f"`logs/sessions/{audit().session_id}.jsonl`"
-    )
-    st.code("\n".join(st.session_state.log_lines[-300:]) or "暂无日志", language="text")
-
 
 if __name__ == "__main__":
     main()
+
