@@ -1,0 +1,12 @@
+train: D:/demo/PCB/TWO_YOLO_FIXED/images/train
+val: D:/demo/PCB/TWO_YOLO_FIXED/images/val
+test: D:/demo/PCB/TWO_YOLO_FIXED/images/val
+
+nc: 6
+names:
+  0: missing_hole
+  1: mouse_bite
+  2: open_circuit
+  3: short
+  4: spur
+  5: spurious_copper

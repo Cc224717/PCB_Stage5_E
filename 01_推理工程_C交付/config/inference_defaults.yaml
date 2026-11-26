@@ -1,0 +1,28 @@
+﻿# Defaults aligned with stage4_deployment/stage4_config.yaml (B side verified)
+primary_model: high_accuracy
+imgsz: 1024
+conf_default: 0.25
+conf_val_benchmark: 0.001
+iou_nms: 0.7
+batch_export: 1
+warmup_frames: 30
+benchmark_runs: 200
+ultralytics_version: 8.4.115
+pytorch: 2.6.0+cu124
+cuda: 12.4
+tensorrt_precision: FP16
+high_accuracy:
+  params: 3916634
+  pytorch_fps_ref: 22.17
+  tensorrt_fps_ref: 27.00
+  model_size_mb_pt: 8.21
+  model_size_mb_onnx: 14.79
+  model_size_mb_engine: 11.93
+  custom_cbam: true
+lightweight_baseline:
+  params: 2927352
+  pytorch_fps_ref: 23.08
+  tensorrt_fps_ref: 27.67
+  custom_cbam: false
+cross_line_finetune:
+  note: imgsz 640, different nc mapping - see models/cross_line_finetune/data.yaml

@@ -1,0 +1,83 @@
+================================================================
+阶段五 系统展示 —— 给 E 的交付包 · 接入说明
+打包人：B（项目负责人）    日期：2026-11-24
+================================================================
+
+【一句话任务】
+基于 01_推理工程_C交付 里的推理工程原型，搭建 PCB 缺陷检测系统展示界面：
+单图检测 / 批量检测 / 结果保存 / 日志显示 / 推理耗时 / 模型切换 / 阈值调节。
+
+【目录说明】
+01_推理工程_C交付/        ← C 的推理工程（你的开发底座，直接在此包 UI）
+  ├ README.txt            C 写的原包说明，先读
+  ├ inference_engine.py   推理引擎封装（PyTorch/ONNX/engine 已通）
+  ├ batch_detect.py       批量检测（已含 CLI/日志/阈值/耗时/任务错误处理迭代）
+  ├ threshold_config.py   阈值配置
+  ├ logging_config.py     日志配置
+  ├ smoke_test.py / engine_test.py   冒烟测试，环境搭好后先跑这两个
+  ├ models/               三套权重（见下方口径）
+  ├ arch/                 模型结构 yaml（P2+CBAM / P2-only）
+  ├ python/cbam_module.py 加载高精度模型前必须能 import 到的 CBAM 定义
+  ├ config/               类别、推理默认超参
+  └ samples/ + runs/      已有推理示例输出，可参考输出格式
+02_部署参考_D阶段/        D 的部署说明与环境记录（int8/剪枝/多后端结论在这）
+03_演示样本/              12 张 val 演示图（6 类 × 2 张），界面演示与截图用
+
+【上线口径（重要，写进系统"模型信息"与答辩口径）】
+1. 默认上线模型 = models/high_accuracy/best.pt
+   即 YOLOv8n-P2-CBAM-light（P3点位），391.7万参数，8.21MB。
+   与论文部署表（comparison.csv）完全同一权重，勿混用其他版本。
+2. 轻量对照 = models/lightweight_baseline/best.pt（P2-only，292.7万，6.31MB），
+   用于界面"模型切换"功能展示精度/速度差异。
+3. 跨产线微调模型 = models/cross_line_finetune/best.pt，imgsz=640，
+   类别映射见同目录 data.yaml，用于泛化演示（可选）。
+4. 推理默认超参：imgsz=1024（主模型）/ 640（cross_line）、conf=0.25、iou=0.7。
+   与论文 benchmark 对齐时用 conf=0.001。
+
+【环境】
+- requirements-lock.txt 有锁定版本；GPU 路径需 torch+cu124 + TensorRT。
+- best.engine 与 RTX 4060 Laptop + CUDA 12.4 绑定，换机器必须用
+  best.onnx 重新导出（D 的部署环境说明.md 有导出命令）。
+- 纯 CPU 也能跑 PyTorch/ONNX 路径，只是 FPS 低，开发期够用。
+
+【加载高精度模型必须先注册 CBAM】（否则报 KeyError: 'CBAM'）
+    import sys
+    from pathlib import Path
+    from ultralytics import YOLO
+    from ultralytics.nn import tasks
+    pkg = Path(__file__).resolve().parent
+    sys.path.insert(0, str(pkg / "python"))
+    from cbam_module import CBAM
+    tasks.CBAM = CBAM
+    model = YOLO(str(pkg / "models/high_accuracy/best.pt"))
+
+【已知坑（别踩）】
+1. ONNX Runtime 直接 CUDA 绑定曾报 "no data transfer registered" 错误
+   （见 benchmark/comparison.csv error 列），D 的结论是走 ultralytics
+   封装或 CPUExecutionProvider 稳；engine 路径最稳。
+2. stage3_stability 里 seed0 有个 28MB 旧权重，属历史异常，不要用。
+3. batch_detect_before_*.py 是 C 的开发历史版本，仅作参考，以
+   batch_detect.py 为准。
+
+【指标速查（界面"关于/模型信息"可引用）】
+高精度 P2+CBAM-light：mAP50 0.92742 / mAP50-95 0.50509 / R 0.88295
+                      三种子均值 mAP50-95 0.5070±0.0041
+轻量 P2-only       ：mAP50 0.91289 / mAP50-95 0.49539
+Baseline           ：mAP50 0.83469（改进 +0.093）
+TensorRT FP16      ：27 FPS，精度几乎无损（部署表 comparison.csv）
+
+【验收清单（答辩必需截图，照 K.record 06_system_demo 标准）】
+□ 单图检测：上传/选择图片 → 画框 + 类别 + 置信度 → 结果保存
+□ 批量检测：选文件夹 → 逐张检测 → 汇总结果（含 results.json/csv 导出）
+□ 日志显示：时间戳 + 模型名 + 耗时 + 异常捕获（C 的 logging_config 可直接用）
+□ 推理耗时：单张 ms 与批量 FPS 实时显示
+□ 模型切换：高精度 / 轻量 / 跨产线 至少三档可切，切换后信息正确
+□ 阈值调节：conf 滑条实时生效，对比同一图不同阈值结果
+□ 结果保存：标注图 + json/csv 可导出
+□ 界面截图 + 日志截图 + 结果目录截图，全部归档到 06_system_demo
+【性能口径】系统整体可用性优先；检测核心指标以论文表为准，
+界面 FPS 与论文 benchmark 允许有差异（标注测试环境即可）。
+
+完工后请回传：整个工程目录 + 截图包，我来对接论文与答辩材料。
+有任何阻塞第一时间找 B，不要自行更换模型权重或改类别定义。
+================================================================

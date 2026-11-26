@@ -1,0 +1,161 @@
+[
+  {
+    "file": "C:\\Users\\欧阳子辰\\Desktop\\PCB_Stage5_E交付包\\01_推理工程_C交付\\samples\\images\\mouse_bite_07_mouse_bite_08.jpg",
+    "status": "ok",
+    "detections": [
+      {
+        "class_id": 1,
+        "class_name": "mouse_bite",
+        "confidence": 0.8956,
+        "xyxy": [
+          2127.16,
+          831.11,
+          2207.25,
+          882.59
+        ]
+      },
+      {
+        "class_id": 1,
+        "class_name": "mouse_bite",
+        "confidence": 0.8474,
+        "xyxy": [
+          1094.74,
+          558.31,
+          1148.63,
+          637.25
+        ]
+      },
+      {
+        "class_id": 1,
+        "class_name": "mouse_bite",
+        "confidence": 0.8162,
+        "xyxy": [
+          1051.49,
+          1304.06,
+          1143.37,
+          1361.17
+        ]
+      },
+      {
+        "class_id": 1,
+        "class_name": "mouse_bite",
+        "confidence": 0.7894,
+        "xyxy": [
+          1773.98,
+          630.47,
+          1855.64,
+          686.97
+        ]
+      },
+      {
+        "class_id": 1,
+        "class_name": "mouse_bite",
+        "confidence": 0.7004,
+        "xyxy": [
+          2682.06,
+          517.08,
+          2737.09,
+          610.75
+        ]
+      }
+    ],
+    "predict_call_ms": 349.11,
+    "total_ms": 399.54,
+    "annotated_image": "C:\\Users\\欧阳子辰\\Desktop\\PCB_Stage5_E交付包\\01_推理工程_C交付\\runs\\batch\\images\\0001_mouse_bite_07_mouse_bite_08.jpg"
+  },
+  {
+    "file": "C:\\Users\\欧阳子辰\\Desktop\\PCB_Stage5_E交付包\\01_推理工程_C交付\\samples\\images\\spur_06_spur_01.jpg",
+    "status": "ok",
+    "detections": [
+      {
+        "class_id": 4,
+        "class_name": "spur",
+        "confidence": 0.881,
+        "xyxy": [
+          452.29,
+          951.07,
+          546.92,
+          998.38
+        ]
+      },
+      {
+        "class_id": 4,
+        "class_name": "spur",
+        "confidence": 0.7899,
+        "xyxy": [
+          1841.3,
+          875.12,
+          1876.16,
+          948.4
+        ]
+      },
+      {
+        "class_id": 4,
+        "class_name": "spur",
+        "confidence": 0.7176,
+        "xyxy": [
+          969.95,
+          1269.97,
+          1009.27,
+          1358.22
+        ]
+      },
+      {
+        "class_id": 4,
+        "class_name": "spur",
+        "confidence": 0.6742,
+        "xyxy": [
+          2051.3,
+          1394.41,
+          2087.41,
+          1477.18
+        ]
+      },
+      {
+        "class_id": 4,
+        "class_name": "spur",
+        "confidence": 0.3595,
+        "xyxy": [
+          475.2,
+          952.51,
+          549.86,
+          995.03
+        ]
+      }
+    ],
+    "predict_call_ms": 425.41,
+    "total_ms": 479.65,
+    "annotated_image": "C:\\Users\\欧阳子辰\\Desktop\\PCB_Stage5_E交付包\\01_推理工程_C交付\\runs\\batch\\images\\0002_spur_06_spur_01.jpg"
+  },
+  {
+    "file": "C:\\Users\\欧阳子辰\\Desktop\\PCB_Stage5_E交付包\\01_推理工程_C交付\\samples\\images\\spurious_copper_01_spurious_copper_12.jpg",
+    "status": "ok",
+    "detections": [
+      {
+        "class_id": 5,
+        "class_name": "spurious_copper",
+        "confidence": 0.5492,
+        "xyxy": [
+          2343.94,
+          1132.34,
+          2461.51,
+          1179.07
+        ]
+      },
+      {
+        "class_id": 5,
+        "class_name": "spurious_copper",
+        "confidence": 0.3771,
+        "xyxy": [
+          2693.39,
+          1092.85,
+          2750.26,
+          1126.02
+        ]
+      }
+    ],
+    "predict_call_ms": 302.26,
+    "total_ms": 346.51,
+    "annotated_image": "C:\\Users\\欧阳子辰\\Desktop\\PCB_Stage5_E交付包\\01_推理工程_C交付\\runs\\batch\\images\\0003_spurious_copper_01_spurious_copper_12.jpg"
+  }
+]

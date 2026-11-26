@@ -1,0 +1,48 @@
+PCB 缺陷检测 —— Stage4 部署/量化/剪枝 套件说明（相对路径版）
+==============================================================
+供成员D：INT8量化验证、通道剪枝20%、TFLite Linux导出、多后端对比补测、部署环境说明。
+
+【第一步：摆放目录（一次即可）】
+1. 把本套件解压到某个工作目录，例如 workspace/PCB_Stage4_部署套件/
+2. 把 PCB_YOLO_DATASET.zip 解压，得到 PCB_YOLO_DATASET/ 文件夹，
+   放进套件根目录，最终结构：
+     workspace/PCB_Stage4_部署套件/
+       stage4_deployment/     (stage4.py, stage4_config.yaml, run_stage4.ps1, requirements-stage4.txt, outputs/)
+       cbam_module.py
+       configs/yolov8n_p2_cbam_p3_point_only.yaml
+       runs/detect/...        (两个 best.pt)
+       PCB_YOLO_DATASET/      (数据集，data.yaml 已是相对路径)
+3. 所有命令都在“套件根目录 PCB_Stage4_部署套件/”下执行。
+
+【配置已是相对路径，无需再改】
+   data        = PCB_YOLO_DATASET/data.yaml
+   weights     = runs/detect/.../weights/best.pt
+   output_dir  = stage4_deployment/outputs
+   data.yaml   = train: train.txt / val: val.txt（相对数据集目录，可跨机使用）
+
+【依赖与环境（部署环境说明所需）】
+- Python 3.10+；PyTorch（GPU 版，匹配 CUDA/driver）
+- pip install -r stage4_deployment/requirements-stage4.txt
+- TensorRT 需与 CUDA/driver 匹配，单独从 NVIDIA 安装
+- TFLite 导出请在 Linux 下进行（Windows 下 Ultralytics 不支持，故安排 Linux 补做）
+- 记录环境：OS、Python、PyTorch、Ultralytics、CUDA、GPU 型号（脚本自动写入 comparison.csv 的 platform 列）
+
+【命令速查】
+python stage4_deployment/stage4.py --model high_accuracy        --action baseline
+python stage4_deployment/stage4.py --model high_accuracy        --action export --format onnx
+python stage4_deployment/stage4.py --model high_accuracy        --action export --format engine_fp16
+python stage4_deployment/stage4.py --model high_accuracy        --action export --format engine_int8
+python stage4_deployment/stage4.py --model lightweight_baseline --action export --format tflite
+python stage4_deployment/stage4.py --model high_accuracy        --action prune  --ratio 0.2
+python stage4_deployment/stage4.py --model high_accuracy        --action evaluate --artifact <导出文件路径>
+
+【已有部署结果（补测请在其后追加）】
+stage4_deployment/outputs/comparison.csv   已完成的 PyTorch FP32 / ONNX Runtime / TensorRT FP16 / TFLite(失败) 记录，含机型与环境
+stage4_deployment/outputs/latest_result.json 最近一次结果
+说明：本套件不含已导出的 ONNX/engine 文件（engine 与显卡+TensorRT 版本强绑定、不可移植），
+      请在目标环境用上面的 export 命令自行导出。
+
+【停止规则（来自配置）】
+- INT8/剪枝后 mAP50-95 下降 > 0.02 且提速不明显 → 停止
+- FPS 已满足实时（>20）即可
+- 导出结果需与 PyTorch 基本一致

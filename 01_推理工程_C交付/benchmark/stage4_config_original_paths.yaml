@@ -1,0 +1,41 @@
+project_root: "D:/demo/PCB/try or test"
+data: "D:/demo/PCB/PCB_YOLO_DATASET/data.yaml"
+output_dir: "D:/demo/PCB/try or test/stage4_deployment/outputs"
+imgsz: 1024
+batch: 1
+device: 0
+workers: 0
+warmup: 30
+benchmark_runs: 200
+conf: 0.001
+iou: 0.7
+models:
+  high_accuracy:
+    weights: "D:/demo/PCB/try or test/runs/detect/pcb_P2_cbam_point_ablation/p2_cbam_p3_point_only_img1024/weights/best.pt"
+    custom_cbam: true
+  lightweight_baseline:
+    weights: "D:/demo/PCB/try or test/runs/detect/pcb_P2_only_tuning/p2_only_img1024_aug_light/weights/best.pt"
+    custom_cbam: false
+exports:
+  onnx:
+    opset: 17
+    simplify: true
+    dynamic: false
+  tensorrt_fp16:
+    workspace: 4
+  tensorrt_int8:
+    workspace: 4
+    fraction: 1.0
+  tflite:
+    int8: false
+pruning:
+  ratios: [0.10, 0.20, 0.30]
+  finetune_epochs: 30
+  patience: 10
+  batch: 8
+  lr0: 0.001
+  method: magnitude
+stop_rules:
+  max_map5095_drop: 0.02
+  realtime_fps: 20
+  min_speedup_ratio: 1.10

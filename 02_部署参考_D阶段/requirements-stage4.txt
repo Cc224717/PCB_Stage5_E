@@ -1,0 +1,10 @@
+ultralytics
+onnx
+onnxruntime-gpu
+onnxslim
+onnxscript
+openvino
+pandas
+pyyaml
+# TensorRT must match the installed CUDA/driver; install it separately from NVIDIA.
+# TFLite export dependencies are installed automatically by Ultralytics when supported.

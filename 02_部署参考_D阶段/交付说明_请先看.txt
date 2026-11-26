@@ -1,0 +1,26 @@
+给 D 的交付说明
+=================================
+两个包，覆盖 Stage4 部署阶段全部前置资源。
+
+1) PCB_YOLO_DATASET.zip  —— 数据集（约 1.17 GB）
+   images/train、images/val、labels/train、labels/val、train.txt、val.txt、data.yaml。
+   data.yaml 已改为相对路径（train: train.txt / val: val.txt），跨机可直接用。
+   6 类，训练 554 张、验证 139 张（602 实例），与原实验口径一致。
+
+2) PCB_Stage4_部署套件.zip  —— 部署/量化/剪枝工具链（约 12 MB）
+   - stage4.py / stage4_config.yaml（已改相对路径，可直接运行）/ run_stage4.ps1 / requirements-stage4.txt
+   - cbam_module.py（高精度模型含自定义 CBAM 层，加载前必须能 import 到）
+   - configs/yolov8n_p2_cbam_p3_point_only.yaml（高精度模型结构）
+   - 两个权重：high_accuracy（P2+CBAM-light）与 lightweight_baseline（P2-only）
+   - outputs/comparison.csv、latest_result.json（已有部署对比结果，用于“补测”续写）
+   注：未含已导出的 ONNX/engine 文件（engine 与显卡+TensorRT 版本强绑定、不可移植），
+       请在目标环境用 export 命令自行导出。
+
+【怎么跑（一次摆好目录，之后直接运行）】
+把两个包解压到同一工作目录，使结构为：
+  PCB_Stage4_部署套件/
+    stage4_deployment/  cbam_module.py  configs/  runs/  PCB_YOLO_DATASET/
+然后在 PCB_Stage4_部署套件/ 目录下执行，例如：
+  python stage4_deployment/stage4.py --model high_accuracy --action baseline
+
+对应任务：INT8 量化验证、通道剪枝 20%、TFLite Linux 导出、多后端对比补测、部署环境说明。
