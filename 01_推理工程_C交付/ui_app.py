@@ -685,11 +685,9 @@ def track_setting_changes(model_name: str, conf: float, iou: float) -> None:
 def render_sidebar():
     st.sidebar.header("检测设置")
     role_label = "管理员" if st.session_state.user_role == "admin" else "普通用户"
-    st.sidebar.markdown(
-        f"**当前用户**：{st.session_state.operator}  \n"
-        f"**账号**：`{st.session_state.username}`  \n"
-        f"**角色**：{role_label}"
-    )
+    st.sidebar.markdown(f"**当前用户**：{st.session_state.operator or '-'}")
+    st.sidebar.markdown(f"**账号**：{st.session_state.username or '-'}")
+    st.sidebar.markdown(f"**角色**：{role_label}")
 
     with st.sidebar.expander("修改密码", expanded=False):
         with st.form("change_password_form"):
