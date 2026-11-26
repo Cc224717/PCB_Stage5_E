@@ -29,9 +29,11 @@ PyYAML==6.0.3
 requests==2.34.2
 six==1.17.0
 sympy==1.13.1
-torch==2.6.0+cpu
-torchvision==0.21.0+cpu
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
 typing_extensions==4.16.0
 ultralytics==8.4.115
 ultralytics-thop==2.2.2
 urllib3==2.8.0
+extra-streamlit-components==0.1.81
+streamlit==1.67.0

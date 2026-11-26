@@ -10,8 +10,19 @@ from __future__ import annotations
 
 import importlib
 import json
+import sys
 import traceback
 from pathlib import Path
+from typing import Any
+
+# Windows venv 下 Streamlit 子进程有时会落到 base Python（无 site-packages），
+# 这里强制把唯一保留的 GPU 环境 site-packages 放到最前，避免页面误报无 CUDA。
+_GPU_ENV_SITE = Path(r"D:\PCB_envs\pcb_stage5_cu124\Lib\site-packages")
+if _GPU_ENV_SITE.is_dir():
+    _site = str(_GPU_ENV_SITE)
+    if _site in sys.path:
+        sys.path.remove(_site)
+    sys.path.insert(0, _site)
 
 import cv2
 import numpy as np
@@ -20,6 +31,15 @@ import streamlit as st
 
 import db as db_mod
 import ui_audit as ui_audit_mod
+from auth_persist import (
+    AUTH_TTL_HOURS,
+    clear_auth_cookie,
+    format_exp,
+    issue_token,
+    read_token_from_browser,
+    save_auth_cookie,
+    verify_token,
+)
 from inference_engine import InferenceEngine
 from logging_config import setup_logging
 
@@ -207,10 +227,16 @@ def init_state() -> None:
         st.session_state.prev_sample = "（不使用示例）"
     if "prev_tab" not in st.session_state:
         st.session_state.prev_tab = "单图检测"
+    if "device_mode" not in st.session_state:
+        st.session_state.device_mode = "GPU"  # 默认 GPU
+    if "prev_device_mode" not in st.session_state:
+        st.session_state.prev_device_mode = "GPU"
     if "active_tab" not in st.session_state:
         st.session_state.active_tab = "单图检测"
     if "last_single_view" not in st.session_state:
         st.session_state.last_single_view = None
+    if "auth_exp" not in st.session_state:
+        st.session_state.auth_exp = None
 
     if "audit" not in st.session_state:
         logger_obj = audit()
@@ -230,13 +256,39 @@ def init_state() -> None:
         audit()
 
 
+def cuda_available() -> bool:
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def pick_device() -> str:
+    """按页面选择返回设备；默认 GPU，CUDA 不可用时回退 CPU。"""
+    prefer_gpu = str(st.session_state.get("device_mode", "GPU")).upper() != "CPU"
+    if prefer_gpu and cuda_available():
+        return "0"
+    return "cpu"
+
+
+def device_label(device: str | None = None) -> str:
+    d = device if device is not None else pick_device()
+    if d == "cpu":
+        return "CPU"
+    return f"GPU (cuda:{d})"
+
+
 def ensure_engine(model_name: str, conf: float, iou: float) -> InferenceEngine:
     info = MODEL_OPTIONS[model_name]
     engine = st.session_state.engine
+    device = pick_device()
     need_reload = (
         engine is None
         or st.session_state.model_name != model_name
         or Path(engine.weights) != info["weights"]
+        or getattr(engine, "device", None) != device
     )
 
     if need_reload:
@@ -246,11 +298,12 @@ def ensure_engine(model_name: str, conf: float, iou: float) -> InferenceEngine:
             model_name=model_name,
             weights=str(info["weights"]),
             imgsz=info["imgsz"],
+            device=device,
         )
         blog(line)
         st.session_state.engine = InferenceEngine(
             weights=info["weights"],
-            device="cpu",
+            device=device,
             imgsz=info["imgsz"],
             conf=conf,
             iou=iou,
@@ -262,6 +315,7 @@ def ensure_engine(model_name: str, conf: float, iou: float) -> InferenceEngine:
             model_name=model_name,
             imgsz=info["imgsz"],
             note=info["note"],
+            device=device,
         )
         blog(line)
     else:
@@ -492,12 +546,95 @@ def _set_auth_message(message: str, kind: str = "info") -> None:
     st.session_state.auth_message_type = kind
 
 
+def _cookie_manager():
+    """浏览器 Cookie 读写（登录态跨刷新）。"""
+    import extra_streamlit_components as esc
+
+    return esc.CookieManager(key="pcb_auth_cookie_mgr")
+
+
+def _apply_logged_in_user(
+    *,
+    username: str,
+    display_name: str,
+    user_id: Any,
+    role: str,
+    auth_exp: int | None,
+    source: str,
+) -> None:
+    st.session_state.logged_in = True
+    st.session_state.operator = display_name
+    st.session_state.username = username
+    st.session_state.user_id = user_id
+    st.session_state.user_role = role or "user"
+    st.session_state.auth_exp = auth_exp
+    st.session_state.auth_message = ""
+    st.session_state.logger.info(
+        "UI 登录生效 source=%s username=%s role=%s session=%s exp=%s",
+        source,
+        username,
+        st.session_state.user_role,
+        audit().session_id,
+        format_exp(auth_exp),
+    )
+
+
+def try_restore_login(cookie_manager) -> bool:
+    """刷新后从 Cookie 恢复登录；成功返回 True。"""
+    if st.session_state.get("logged_in"):
+        return True
+    if st.session_state.get("_auth_restore_checked"):
+        return False
+    st.session_state._auth_restore_checked = True
+
+    token = read_token_from_browser(cookie_manager)
+    payload = verify_token(token)
+    if payload is None:
+        return False
+
+    user = audit().db.get_user(payload["username"])
+    if user is None or not user.get("is_active", 1):
+        clear_auth_cookie(cookie_manager)
+        return False
+
+    display_name = user.get("display_name") or payload["display_name"] or payload["username"]
+    role = user.get("role") or payload.get("role") or "user"
+    blog(
+        audit().login(
+            payload["username"],
+            purpose="session_restore",
+        )
+    )
+    blog(
+        audit().log_event(
+            "SESSION_LOGIN_RESTORE",
+            message=f"Cookie 恢复登录（有效 {AUTH_TTL_HOURS} 小时）",
+            username=payload["username"],
+            display_name=display_name,
+            user_id=user.get("id"),
+            auth_exp=payload.get("exp"),
+        )
+    )
+    _apply_logged_in_user(
+        username=payload["username"],
+        display_name=display_name,
+        user_id=user.get("id"),
+        role=role,
+        auth_exp=payload.get("exp"),
+        source="cookie",
+    )
+    return True
+
+
 def render_login() -> None:
     _, center, _ = st.columns([1, 1.15, 1])
     with center:
         with st.container(border=True):
             st.title("PCB 缺陷检测系统")
-            st.caption("请先登录后使用检测功能。没有账号可先注册。")
+            st.caption(
+                f"请先登录后使用检测功能。没有账号可先注册。"
+                f"登录后约 {AUTH_TTL_HOURS} 小时内刷新页面无需重新登录。"
+            )
 
             if not audit().db.enabled:
                 st.error("数据库未连接，无法登录/注册。请检查 MySQL 服务与配置。")
@@ -558,6 +695,8 @@ def render_login() -> None:
                         st.rerun()
 
                     display_name = (user or {}).get("display_name") or username.strip()
+                    role = (user or {}).get("role") or "user"
+                    user_id = (user or {}).get("id")
                     # 审计 operator 固定用 username，避免显示名变更导致日志查不到
                     blog(
                         audit().login(
@@ -565,26 +704,31 @@ def render_login() -> None:
                             purpose=purpose.strip() or None,
                         )
                     )
+                    token, exp_ts = issue_token(
+                        username=username.strip(),
+                        user_id=user_id,
+                        role=role,
+                        display_name=display_name,
+                    )
+                    save_auth_cookie(st.session_state._cookie_manager, token, exp_ts)
                     blog(
                         audit().log_event(
                             "SESSION_LOGIN_OK",
                             message="账号密码校验通过",
                             username=username.strip(),
                             display_name=display_name,
-                            user_id=(user or {}).get("id"),
+                            user_id=user_id,
+                            auth_exp=exp_ts,
+                            auth_ttl_hours=AUTH_TTL_HOURS,
                         )
                     )
-                    st.session_state.logged_in = True
-                    st.session_state.operator = display_name
-                    st.session_state.username = username.strip()
-                    st.session_state.user_id = (user or {}).get("id")
-                    st.session_state.user_role = (user or {}).get("role") or "user"
-                    st.session_state.auth_message = ""
-                    st.session_state.logger.info(
-                        "UI 登录成功 username=%s role=%s session=%s",
-                        username.strip(),
-                        st.session_state.user_role,
-                        audit().session_id,
+                    _apply_logged_in_user(
+                        username=username.strip(),
+                        display_name=display_name,
+                        user_id=user_id,
+                        role=role,
+                        auth_exp=exp_ts,
+                        source="password",
                     )
                     st.rerun()
                 return
@@ -683,6 +827,16 @@ def track_setting_changes(model_name: str, conf: float, iou: float) -> None:
             audit().setting_change("iou", st.session_state.prev_iou, iou)
         )
         st.session_state.prev_iou = iou
+    device_mode = str(st.session_state.get("device_mode", "GPU"))
+    if device_mode != st.session_state.prev_device_mode:
+        blog(
+            audit().setting_change(
+                "device", st.session_state.prev_device_mode, device_mode
+            )
+        )
+        st.session_state.prev_device_mode = device_mode
+        # 切换设备后强制下次按新 device 重载模型
+        st.session_state.engine = None
 
 
 def render_sidebar():
@@ -691,6 +845,10 @@ def render_sidebar():
     st.sidebar.markdown(f"**当前用户**：{st.session_state.operator or '-'}")
     st.sidebar.markdown(f"**账号**：{st.session_state.username or '-'}")
     st.sidebar.markdown(f"**角色**：{role_label}")
+    st.sidebar.caption(
+        f"登录有效至 {format_exp(st.session_state.get('auth_exp'))}"
+        f"（约 {AUTH_TTL_HOURS} 小时，刷新可保持）"
+    )
 
     with st.sidebar.expander("修改密码", expanded=False):
         with st.form("change_password_form"):
@@ -765,16 +923,33 @@ def render_sidebar():
         options=list(MODEL_OPTIONS.keys()),
         index=list(MODEL_OPTIONS.keys()).index(st.session_state.model_name),
     )
+    st.sidebar.radio(
+        "推理设备",
+        options=["GPU", "CPU"],
+        horizontal=True,
+        key="device_mode",
+        help="默认 GPU；无 CUDA 时选 GPU 会自动回退到 CPU",
+    )
+    if st.session_state.device_mode == "GPU" and not cuda_available():
+        import sys as _sys
+
+        st.sidebar.warning(
+            "当前进程检测不到 CUDA，实际将使用 CPU。\n"
+            f"解释器：`{_sys.executable}`\n"
+            "请用 `启动界面.bat` 或 `D:\\PCB_envs\\pcb_stage5_cu124\\Scripts\\python.exe` 启动。"
+        )
     conf = st.sidebar.slider("置信度 conf", 0.05, 0.95, float(st.session_state.prev_conf), 0.01)
     iou = st.sidebar.slider("NMS IoU", 0.10, 0.95, float(st.session_state.prev_iou), 0.01)
 
     track_setting_changes(model_name, conf, iou)
 
     info = MODEL_OPTIONS[model_name]
+    device_now = pick_device()
     st.sidebar.markdown(
         f"**模型信息**  \n"
         f"- 权重：`{info['weights'].name}`  \n"
         f"- imgsz：`{info['imgsz']}`  \n"
+        f"- 设备：`{device_label(device_now)}`  \n"
         f"- {info['note']}"
     )
 
@@ -804,13 +979,18 @@ def render_sidebar():
             st.session_state.operator,
             audit().session_id,
         )
+        cm = st.session_state.get("_cookie_manager")
+        if cm is not None:
+            clear_auth_cookie(cm)
         st.session_state.logged_in = False
         st.session_state.operator = ""
         st.session_state.username = ""
         st.session_state.user_id = None
         st.session_state.user_role = "user"
+        st.session_state.auth_exp = None
         st.session_state.login_username = ""
         st.session_state.auth_panel = "登录"
+        st.session_state._auth_restore_checked = True  # 退出后本会话不再自动恢复
         _set_auth_message("已退出登录", "info")
         # 清掉旧实例，让 audit() 用最新模块重建
         st.session_state.pop("audit", None)
@@ -1383,13 +1563,20 @@ def main() -> None:
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+    cookie_manager = _cookie_manager()
+    st.session_state._cookie_manager = cookie_manager
+    try_restore_login(cookie_manager)
+
     if not st.session_state.logged_in:
         render_login()
         audit().heartbeat({"page": "login"})
         return
 
     st.title("PCB 缺陷检测系统")
-    st.caption(f"当前用户：{st.session_state.operator} · 单图/批量检测 · 模型切换 · 阈值调节 · 结果导出")
+    st.caption(
+        f"当前用户：{st.session_state.operator} · 登录有效至 {format_exp(st.session_state.get('auth_exp'))}"
+        f" · 单图/批量检测 · 模型切换 · 设备切换 · 结果导出"
+    )
 
     model_name, conf, iou = render_sidebar()
 

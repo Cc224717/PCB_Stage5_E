@@ -30,6 +30,7 @@ Thumbs.db
 
 # Local DB secrets
 01_推理工程_C交付/config/db_config.yaml
+01_推理工程_C交付/config/auth_secret.key
 
 # Ultralytics / torch caches
 .ultralytics/
