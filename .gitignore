@@ -24,6 +24,10 @@ Thumbs.db
 # UI session outputs (generated at runtime)
 01_推理工程_C交付/runs/ui/
 
+# Acceptance test runtime outputs
+04_验收测试/out/
+04_验收测试/**/__pycache__/
+
 # Local DB secrets
 01_推理工程_C交付/config/db_config.yaml
 

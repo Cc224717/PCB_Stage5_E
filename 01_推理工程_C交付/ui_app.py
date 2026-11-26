@@ -408,7 +408,7 @@ def _show_single_result_view(view: dict) -> None:
         col_a, col_b = st.columns(2)
         with col_a:
             st.markdown(f"**阈值 A：conf={conf:.2f}**")
-            st.image(bgr_to_rgb(path_a), use_container_width=True)
+            st.image(bgr_to_rgb(path_a), width="stretch")
             render_timing_metrics(
                 box_count=len(result_a["detections"]),
                 predict_ms=float(result_a["predict_call_ms"]),
@@ -417,11 +417,11 @@ def _show_single_result_view(view: dict) -> None:
             )
             st.dataframe(
                 detections_to_df(result_a["detections"]),
-                use_container_width=True,
+                width="stretch",
             )
         with col_b:
             st.markdown(f"**阈值 B：conf={conf_b:.2f}**")
-            st.image(bgr_to_rgb(path_b), use_container_width=True)
+            st.image(bgr_to_rgb(path_b), width="stretch")
             render_timing_metrics(
                 box_count=len(result_b["detections"]),
                 predict_ms=float(result_b["predict_call_ms"]),
@@ -430,14 +430,14 @@ def _show_single_result_view(view: dict) -> None:
             )
             st.dataframe(
                 detections_to_df(result_b["detections"]),
-                use_container_width=True,
+                width="stretch",
             )
         st.caption(
             f"对比结论：A 检出 {len(result_a['detections'])} 框，"
             f"B 检出 {len(result_b['detections'])} 框"
         )
     else:
-        st.image(bgr_to_rgb(path_a), caption="检测结果（画框）", use_container_width=True)
+        st.image(bgr_to_rgb(path_a), caption="检测结果（画框）", width="stretch")
         render_timing_metrics(
             box_count=len(result_a["detections"]),
             predict_ms=float(result_a["predict_call_ms"]),
@@ -452,7 +452,7 @@ def _show_single_result_view(view: dict) -> None:
         )
         st.dataframe(
             detections_to_df(result_a["detections"]),
-            use_container_width=True,
+            width="stretch",
         )
 
     if json_path is not None and json_path.is_file():
@@ -534,7 +534,7 @@ def render_login() -> None:
                         "本次用途（可选）", placeholder="例如：答辩演示"
                     )
                     submitted = st.form_submit_button(
-                        "登录", type="primary", use_container_width=True
+                        "登录", type="primary", width="stretch"
                     )
 
                 if submitted:
@@ -610,7 +610,7 @@ def render_login() -> None:
                 reg_submitted = st.form_submit_button(
                     "注册",
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
             if not reg_submitted:
@@ -694,7 +694,7 @@ def render_sidebar():
             old_pwd = st.text_input("原密码", type="password")
             new_pwd = st.text_input("新密码", type="password", placeholder="至少 6 位")
             new_pwd2 = st.text_input("确认新密码", type="password")
-            change_btn = st.form_submit_button("确认修改", use_container_width=True)
+            change_btn = st.form_submit_button("确认修改", width="stretch")
         if change_btn:
             blog(audit().click("修改密码", username=st.session_state.username))
             if new_pwd != new_pwd2:
@@ -740,11 +740,11 @@ def render_sidebar():
                         }
                         for u in users
                     ],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
             unlock_name = st.text_input("解锁登录限制的用户名", key="admin_unlock_user")
-            if st.button("解除登录锁定", use_container_width=True):
+            if st.button("解除登录锁定", width="stretch"):
                 blog(
                     audit().click(
                         "管理员解锁登录",
@@ -776,7 +776,7 @@ def render_sidebar():
     )
 
     st.sidebar.caption("检测时会自动加载；此按钮用于提前预热/验证权重。")
-    if st.sidebar.button("加载 / 切换模型", use_container_width=True):
+    if st.sidebar.button("加载 / 切换模型", width="stretch"):
         blog(
             audit().click(
                 "加载/切换模型",
@@ -793,7 +793,7 @@ def render_sidebar():
                 blog(audit().error(f"模型切换失败: {exc}", traceback=traceback.format_exc()))
                 st.sidebar.error(f"加载失败：{exc}")
 
-    if st.sidebar.button("退出登录", use_container_width=True):
+    if st.sidebar.button("退出登录", width="stretch"):
         blog(audit().click("退出登录"))
         blog(audit().logout(reason="user_logout_button"))
         st.session_state.logger.info(
@@ -889,7 +889,7 @@ def render_single_tab(model_name: str, conf: float, iou: float) -> None:
             )
             st.caption(f"将对比 conf={conf:.2f} 与 conf={conf_b:.2f}")
 
-        run = st.button("开始单图检测", type="primary", use_container_width=True)
+        run = st.button("开始单图检测", type="primary", width="stretch")
 
     if not run:
         with right:
@@ -1067,7 +1067,7 @@ def render_batch_tab(model_name: str, conf: float, iou: float) -> None:
         )
         st.session_state.last_batch_uploads = upload_names
 
-    run = st.button("开始批量检测", type="primary", use_container_width=True)
+    run = st.button("开始批量检测", type="primary", width="stretch")
 
     if not run:
         st.info("可一次选择多张图；完成后可下载 JSON / CSV。")
@@ -1235,7 +1235,7 @@ def render_batch_tab(model_name: str, conf: float, iou: float) -> None:
         )
         if gallery:
             st.image(gallery, caption=[f"结果 {i+1}" for i in range(len(gallery))], width=320)
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, width="stretch")
         c1, c2 = st.columns(2)
         with c1:
             if st.download_button(
@@ -1370,7 +1370,7 @@ def render_recent_log_summary() -> None:
                     "级别": item.get("level") or "INFO",
                 }
             )
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
         st.caption("完整明细在 MySQL / logs，不在页面刷屏展示。")
 
 
