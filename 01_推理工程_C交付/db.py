@@ -380,6 +380,40 @@ class Database:
                         """
                     )
         self.ensure_default_admin()
+        self.normalize_legacy_operators()
+
+    def normalize_legacy_operators(self) -> dict[str, int]:
+        """将历史显示名 operator 归一到 username，消除显示名碰撞串视。
+
+        早期审计曾把 display_name 写入 operator（如「潮」），
+        现统一改为登录用户名「欧阳潮」。可重复执行，已归一则无改动。
+        """
+        if not self.enabled:
+            return {}
+        # (旧 operator / 显示名, 目标 username)
+        aliases = (("潮", "欧阳潮"),)
+        updated: dict[str, int] = {}
+        tables = ("audit_events", "detect_jobs", "sessions")
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                for old_name, new_name in aliases:
+                    # 仅当目标用户存在时才迁移，避免误伤
+                    cur.execute(
+                        "SELECT id FROM users WHERE username = %s LIMIT 1",
+                        (new_name,),
+                    )
+                    if cur.fetchone() is None:
+                        continue
+                    total = 0
+                    for table in tables:
+                        cur.execute(
+                            f"UPDATE {table} SET operator = %s WHERE operator = %s",
+                            (new_name, old_name),
+                        )
+                        total += int(cur.rowcount or 0)
+                    if total:
+                        updated[f"{old_name}->{new_name}"] = total
+        return updated
 
     def ensure_default_admin(self) -> None:
         """若无管理员，则创建默认账号 admin / Admin123!"""

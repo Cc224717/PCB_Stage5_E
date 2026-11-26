@@ -1512,17 +1512,17 @@ def _try_register_disconnect_close() -> None:
 
 
 def render_recent_log_summary() -> None:
-    """验收用：只展示当前用户最近几条后台日志摘要。"""
+    """验收用：只展示当前用户最近几条后台日志摘要。
+
+    仅按 username 过滤，禁止用显示名匹配，避免显示名碰撞串视。
+    """
     with st.expander("我的最近操作摘要（验收日志）", expanded=False):
         try:
             db = audit().db
-            operator_key = st.session_state.username or st.session_state.operator
-            if _db_supports_also_match(db):
-                events = db.recent_events_for_operator(
-                    operator_key,
-                    limit=15,
-                    also_match=[st.session_state.operator, st.session_state.username],
-                )
+            # 只认登录用户名；显示名可重复，绝不能进入 also_match
+            operator_key = (st.session_state.username or "").strip()
+            if not operator_key:
+                events = []
             else:
                 events = db.recent_events_for_operator(operator_key, limit=15)
         except Exception as exc:
