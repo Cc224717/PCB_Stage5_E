@@ -353,6 +353,7 @@ class Database:
                         password_hash VARCHAR(255) NOT NULL,
                         salt VARCHAR(64) NOT NULL,
                         display_name VARCHAR(128) NULL,
+                        role VARCHAR(32) NOT NULL DEFAULT 'user',
                         created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
                         last_login_at DATETIME(3) NULL,
                         is_active TINYINT(1) NOT NULL DEFAULT 1,
@@ -360,6 +361,52 @@ class Database:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """
                 )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'users'
+                      AND COLUMN_NAME = 'role'
+                    """
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        """
+                        ALTER TABLE users
+                        ADD COLUMN role VARCHAR(32) NOT NULL DEFAULT 'user'
+                        AFTER display_name
+                        """
+                    )
+        self.ensure_default_admin()
+
+    def ensure_default_admin(self) -> None:
+        """若无管理员，则创建默认账号 admin / Admin123!"""
+        if not self.enabled:
+            return
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS cnt FROM users WHERE role = 'admin'"
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) > 0:
+                    return
+        # 没有 admin 角色用户时再创建
+        if self.get_user("admin") is None:
+            self.create_user(
+                username="admin",
+                password="Admin123!",
+                display_name="系统管理员",
+                role="admin",
+            )
+        else:
+            with self.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE users SET role = 'admin' WHERE username = 'admin'"
+                    )
 
     def get_user(self, username: str) -> dict[str, Any] | None:
         if not self.enabled:
@@ -368,7 +415,7 @@ class Database:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, username, password_hash, salt, display_name,
+                    SELECT id, username, password_hash, salt, display_name, role,
                            created_at, last_login_at, is_active
                     FROM users
                     WHERE username = %s
@@ -384,10 +431,14 @@ class Database:
         username: str,
         password: str,
         display_name: str | None = None,
+        role: str = "user",
     ) -> tuple[bool, str]:
         if not self.enabled:
             return False, "数据库未连接"
         username = username.strip()
+        role = (role or "user").strip().lower()
+        if role not in {"user", "admin"}:
+            role = "user"
         if not username or not password:
             return False, "用户名和密码不能为空"
         if len(username) < 3:
@@ -403,14 +454,199 @@ class Database:
                 with conn.cursor() as cur:
                     cur.execute(
                         """
-                        INSERT INTO users (username, password_hash, salt, display_name)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO users (
+                            username, password_hash, salt, display_name, role
+                        ) VALUES (%s, %s, %s, %s, %s)
                         """,
-                        (username, password_hash, salt, display_name or username),
+                        (
+                            username,
+                            password_hash,
+                            salt,
+                            display_name or username,
+                            role,
+                        ),
                     )
             return True, "注册成功"
         except Exception as exc:
             return False, f"注册失败：{exc}"
+
+    def change_password(
+        self,
+        *,
+        username: str,
+        old_password: str,
+        new_password: str,
+    ) -> tuple[bool, str]:
+        if not self.enabled:
+            return False, "数据库未连接"
+        username = username.strip()
+        if len(new_password) < 6:
+            return False, "新密码至少 6 位"
+        user = self.get_user(username)
+        if user is None:
+            return False, "用户不存在"
+        if not verify_password(old_password, user["password_hash"], user["salt"]):
+            return False, "原密码错误"
+        password_hash, salt = hash_password(new_password)
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE users
+                    SET password_hash = %s, salt = %s
+                    WHERE id = %s
+                    """,
+                    (password_hash, salt, user["id"]),
+                )
+        self.clear_login_failures(username)
+        return True, "密码修改成功"
+
+    def list_users(self, limit: int = 100) -> list[dict[str, Any]]:
+        if not self.enabled:
+            return []
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, username, display_name, role, is_active,
+                           created_at, last_login_at
+                    FROM users
+                    ORDER BY id ASC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+                return list(cur.fetchall() or [])
+
+    def unlock_user_login(self, username: str) -> tuple[bool, str]:
+        if not self.enabled:
+            return False, "数据库未连接"
+        username = username.strip()
+        if not username:
+            return False, "用户名为空"
+        self.clear_login_failures(username)
+        return True, f"已解除 {username} 的登录锁定"
+
+    def ensure_login_guards_table(self) -> None:
+        if not self.enabled:
+            return
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS login_guards (
+                        username VARCHAR(64) PRIMARY KEY,
+                        fail_count INT NOT NULL DEFAULT 0,
+                        lock_until DATETIME(3) NULL,
+                        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+                            ON UPDATE CURRENT_TIMESTAMP(3)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+
+    def get_login_guard(self, username: str) -> dict[str, Any] | None:
+        if not self.enabled:
+            return None
+        username = username.strip()
+        if not username:
+            return None
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT username, fail_count, lock_until, updated_at
+                    FROM login_guards
+                    WHERE username = %s
+                    LIMIT 1
+                    """,
+                    (username,),
+                )
+                return cur.fetchone()
+
+    def check_login_allowed(
+        self,
+        username: str,
+        *,
+        max_fails: int = 5,
+    ) -> tuple[bool, str]:
+        """返回 (是否允许尝试登录, 提示文案)。"""
+        if not self.enabled:
+            return False, "数据库未连接"
+        self.ensure_login_guards_table()
+        username = username.strip()
+        if not username:
+            return False, "请输入用户名和密码"
+
+        guard = self.get_login_guard(username)
+        if not guard:
+            return True, ""
+
+        lock_until = guard.get("lock_until")
+        if lock_until is not None:
+            now = datetime.now()
+            if isinstance(lock_until, datetime) and lock_until > now:
+                seconds = int((lock_until - now).total_seconds())
+                minutes = max(1, (seconds + 59) // 60)
+                return False, f"登录失败次数过多，请 {minutes} 分钟后再试"
+
+        return True, ""
+
+    def record_login_failure(
+        self,
+        username: str,
+        *,
+        max_fails: int = 5,
+        lock_minutes: int = 10,
+    ) -> tuple[int, bool]:
+        """记录一次失败。返回 (当前失败次数, 是否已锁定)。"""
+        if not self.enabled:
+            return 0, False
+        self.ensure_login_guards_table()
+        username = username.strip()
+        if not username:
+            return 0, False
+
+        from datetime import timedelta
+
+        guard = self.get_login_guard(username)
+        now = datetime.now()
+        if guard and guard.get("lock_until") and guard["lock_until"] > now:
+            return int(guard.get("fail_count") or 0), True
+
+        fail_count = int((guard or {}).get("fail_count") or 0) + 1
+        lock_until = (
+            now + timedelta(minutes=lock_minutes)
+            if fail_count >= max_fails
+            else None
+        )
+
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO login_guards (username, fail_count, lock_until)
+                    VALUES (%s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        fail_count = VALUES(fail_count),
+                        lock_until = VALUES(lock_until)
+                    """,
+                    (username, fail_count, lock_until),
+                )
+        return fail_count, lock_until is not None
+
+    def clear_login_failures(self, username: str) -> None:
+        if not self.enabled:
+            return
+        self.ensure_login_guards_table()
+        username = username.strip()
+        if not username:
+            return
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM login_guards WHERE username = %s",
+                    (username,),
+                )
 
     def authenticate(self, username: str, password: str) -> tuple[bool, str, dict[str, Any] | None]:
         if not self.enabled:
@@ -419,14 +655,27 @@ class Database:
         if not username or not password:
             return False, "请输入用户名和密码", None
 
+        allowed, guard_msg = self.check_login_allowed(username)
+        if not allowed:
+            return False, guard_msg, None
+
         user = self.get_user(username)
         if user is None:
-            return False, "用户名或密码错误", None
+            fail_count, locked = self.record_login_failure(username)
+            if locked:
+                return False, "登录失败次数过多，请 10 分钟后再试", None
+            left = max(0, 5 - fail_count)
+            return False, f"用户名或密码错误（还可尝试 {left} 次）", None
         if not user.get("is_active", 1):
             return False, "账号已停用", None
         if not verify_password(password, user["password_hash"], user["salt"]):
-            return False, "用户名或密码错误", None
+            fail_count, locked = self.record_login_failure(username)
+            if locked:
+                return False, "登录失败次数过多，请 10 分钟后再试", None
+            left = max(0, 5 - fail_count)
+            return False, f"用户名或密码错误（还可尝试 {left} 次）", None
 
+        self.clear_login_failures(username)
         with self.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(

@@ -109,10 +109,18 @@ def init_state() -> None:
         st.session_state.operator = ""
     if "user_id" not in st.session_state:
         st.session_state.user_id = None
+    if "username" not in st.session_state:
+        st.session_state.username = ""
+    if "user_role" not in st.session_state:
+        st.session_state.user_role = "user"
     if "auth_message" not in st.session_state:
         st.session_state.auth_message = ""
     if "auth_message_type" not in st.session_state:
         st.session_state.auth_message_type = "info"
+    if "auth_panel" not in st.session_state:
+        st.session_state.auth_panel = "登录"
+    if "login_username" not in st.session_state:
+        st.session_state.login_username = ""
     if "prev_model" not in st.session_state:
         st.session_state.prev_model = "高精度 (high_accuracy)"
     if "prev_conf" not in st.session_state:
@@ -131,8 +139,9 @@ def init_state() -> None:
         st.session_state.audit.bind_streamlit_session(_streamlit_session_id())
         try:
             st.session_state.audit.db.ensure_users_table()
+            st.session_state.audit.db.ensure_login_guards_table()
         except Exception as exc:
-            st.session_state.logger.error("初始化 users 表失败: %s", exc)
+            st.session_state.logger.error("初始化用户相关表失败: %s", exc)
         st.session_state.audit.session_open(
             page="PCB缺陷检测系统",
             client_info={"streamlit_session_id": _streamlit_session_id()},
@@ -284,11 +293,21 @@ def render_login() -> None:
         return
 
     _show_auth_message()
-    tab_login, tab_register = st.tabs(["登录", "注册"])
+    st.radio(
+        "账号操作",
+        options=["登录", "注册"],
+        horizontal=True,
+        key="auth_panel",
+        label_visibility="collapsed",
+    )
 
-    with tab_login:
+    if st.session_state.auth_panel == "登录":
         with st.form("login_form", clear_on_submit=False):
-            username = st.text_input("用户名", placeholder="请输入用户名")
+            username = st.text_input(
+                "用户名",
+                placeholder="请输入用户名",
+                key="login_username",
+            )
             password = st.text_input("密码", type="password", placeholder="请输入密码")
             purpose = st.text_input("本次用途（可选）", placeholder="例如：答辩演示")
             submitted = st.form_submit_button("登录", type="primary", use_container_width=True)
@@ -325,73 +344,84 @@ def render_login() -> None:
             )
             st.session_state.logged_in = True
             st.session_state.operator = display_name
+            st.session_state.username = username.strip()
             st.session_state.user_id = (user or {}).get("id")
+            st.session_state.user_role = (user or {}).get("role") or "user"
             st.session_state.auth_message = ""
             st.session_state.logger.info(
-                "UI 登录成功 username=%s session=%s",
+                "UI 登录成功 username=%s role=%s session=%s",
                 username.strip(),
+                st.session_state.user_role,
                 audit().session_id,
             )
             st.rerun()
+        return
 
-    with tab_register:
-        with st.form("register_form", clear_on_submit=False):
-            reg_username = st.text_input("用户名", key="reg_username", placeholder="至少 3 位")
-            reg_display = st.text_input("显示名称（可选）", key="reg_display", placeholder="例如：张三")
-            reg_password = st.text_input(
-                "密码",
-                type="password",
-                key="reg_password",
-                placeholder="至少 6 位",
-            )
-            reg_password2 = st.text_input(
-                "确认密码",
-                type="password",
-                key="reg_password2",
-                placeholder="再输入一次密码",
-            )
-            reg_submitted = st.form_submit_button("注册", type="primary", use_container_width=True)
+    with st.form("register_form", clear_on_submit=False):
+        reg_username = st.text_input("用户名", key="reg_username", placeholder="至少 3 位")
+        reg_display = st.text_input("显示名称（可选）", key="reg_display", placeholder="例如：张三")
+        reg_password = st.text_input(
+            "密码",
+            type="password",
+            key="reg_password",
+            placeholder="至少 6 位",
+        )
+        reg_password2 = st.text_input(
+            "确认密码",
+            type="password",
+            key="reg_password2",
+            placeholder="再输入一次密码",
+        )
+        reg_submitted = st.form_submit_button("注册", type="primary", use_container_width=True)
 
-        if reg_submitted:
-            blog(audit().click("注册", username=reg_username.strip()))
-            if reg_password != reg_password2:
-                blog(
-                    audit().log_event(
-                        "USER_REGISTER_REJECTED",
-                        message="两次密码不一致",
-                        level="WARNING",
-                        username=reg_username.strip(),
-                    )
-                )
-                _set_auth_message("两次输入的密码不一致", "error")
-                st.rerun()
+    if not reg_submitted:
+        return
 
-            ok, message = audit().db.create_user(
+    blog(audit().click("注册", username=reg_username.strip()))
+    if reg_password != reg_password2:
+        blog(
+            audit().log_event(
+                "USER_REGISTER_REJECTED",
+                message="两次密码不一致",
+                level="WARNING",
                 username=reg_username.strip(),
-                password=reg_password,
-                display_name=reg_display.strip() or None,
             )
-            if not ok:
-                blog(
-                    audit().log_event(
-                        "USER_REGISTER_REJECTED",
-                        message=message,
-                        level="WARNING",
-                        username=reg_username.strip(),
-                    )
-                )
-                _set_auth_message(message, "error")
-                st.rerun()
+        )
+        _set_auth_message("两次输入的密码不一致", "error")
+        st.rerun()
 
-            blog(
-                audit().log_event(
-                    "USER_REGISTER_OK",
-                    message="注册成功",
-                    username=reg_username.strip(),
-                )
+    ok, message = audit().db.create_user(
+        username=reg_username.strip(),
+        password=reg_password,
+        display_name=reg_display.strip() or None,
+    )
+    if not ok:
+        blog(
+            audit().log_event(
+                "USER_REGISTER_REJECTED",
+                message=message,
+                level="WARNING",
+                username=reg_username.strip(),
             )
-            _set_auth_message("注册成功，请使用新账号登录", "success")
-            st.rerun()
+        )
+        _set_auth_message(message, "error")
+        st.rerun()
+
+    blog(
+        audit().log_event(
+            "USER_REGISTER_OK",
+            message="注册成功，已切换到登录并预填用户名",
+            username=reg_username.strip(),
+        )
+    )
+    st.session_state.login_username = reg_username.strip()
+    st.session_state.auth_panel = "登录"
+    # 清掉注册表单，避免残留
+    for key in ("reg_username", "reg_display", "reg_password", "reg_password2"):
+        if key in st.session_state:
+            del st.session_state[key]
+    _set_auth_message("注册成功，已为你填好用户名，请输入密码登录", "success")
+    st.rerun()
 
 
 def track_setting_changes(model_name: str, conf: float, iou: float) -> None:
@@ -414,7 +444,80 @@ def track_setting_changes(model_name: str, conf: float, iou: float) -> None:
 
 def render_sidebar():
     st.sidebar.header("检测设置")
-    st.sidebar.markdown(f"**当前用户**：{st.session_state.operator}")
+    role_label = "管理员" if st.session_state.user_role == "admin" else "普通用户"
+    st.sidebar.markdown(
+        f"**当前用户**：{st.session_state.operator}  \n"
+        f"**账号**：`{st.session_state.username}`  \n"
+        f"**角色**：{role_label}"
+    )
+
+    with st.sidebar.expander("修改密码", expanded=False):
+        with st.form("change_password_form"):
+            old_pwd = st.text_input("原密码", type="password")
+            new_pwd = st.text_input("新密码", type="password", placeholder="至少 6 位")
+            new_pwd2 = st.text_input("确认新密码", type="password")
+            change_btn = st.form_submit_button("确认修改", use_container_width=True)
+        if change_btn:
+            blog(audit().click("修改密码", username=st.session_state.username))
+            if new_pwd != new_pwd2:
+                st.sidebar.error("两次新密码不一致")
+            else:
+                ok, message = audit().db.change_password(
+                    username=st.session_state.username,
+                    old_password=old_pwd,
+                    new_password=new_pwd,
+                )
+                if ok:
+                    blog(
+                        audit().log_event(
+                            "PASSWORD_CHANGE_OK",
+                            message=message,
+                            username=st.session_state.username,
+                        )
+                    )
+                    st.sidebar.success(message)
+                else:
+                    blog(
+                        audit().log_event(
+                            "PASSWORD_CHANGE_REJECTED",
+                            message=message,
+                            level="WARNING",
+                            username=st.session_state.username,
+                        )
+                    )
+                    st.sidebar.error(message)
+
+    if st.session_state.user_role == "admin":
+        with st.sidebar.expander("管理员", expanded=False):
+            users = audit().db.list_users()
+            st.caption(f"用户总数：{len(users)}")
+            if users:
+                st.dataframe(
+                    [
+                        {
+                            "用户名": u.get("username"),
+                            "显示名": u.get("display_name"),
+                            "角色": u.get("role"),
+                            "启用": "是" if u.get("is_active") else "否",
+                        }
+                        for u in users
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            unlock_name = st.text_input("解锁登录限制的用户名", key="admin_unlock_user")
+            if st.button("解除登录锁定", use_container_width=True):
+                blog(
+                    audit().click(
+                        "管理员解锁登录",
+                        target_user=unlock_name.strip(),
+                    )
+                )
+                ok, message = audit().db.unlock_user_login(unlock_name.strip())
+                if ok:
+                    st.success(message)
+                else:
+                    st.error(message)
 
     model_name = st.sidebar.selectbox(
         "模型切换",
@@ -461,7 +564,11 @@ def render_sidebar():
         )
         st.session_state.logged_in = False
         st.session_state.operator = ""
+        st.session_state.username = ""
         st.session_state.user_id = None
+        st.session_state.user_role = "user"
+        st.session_state.login_username = ""
+        st.session_state.auth_panel = "登录"
         _set_auth_message("已退出登录", "info")
         st.session_state.audit = UIAuditLogger(LOG_DIR)
         st.session_state.audit.bind_streamlit_session(_streamlit_session_id())

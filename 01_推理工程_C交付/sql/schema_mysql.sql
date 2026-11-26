@@ -7,10 +7,19 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash   VARCHAR(255) NOT NULL,
     salt            VARCHAR(64) NOT NULL,
     display_name    VARCHAR(128) NULL,
+    role            VARCHAR(32) NOT NULL DEFAULT 'user',
     created_at      DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     last_login_at   DATETIME(3) NULL,
     is_active       TINYINT(1) NOT NULL DEFAULT 1,
     INDEX idx_users_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS login_guards (
+    username        VARCHAR(64) PRIMARY KEY,
+    fail_count      INT NOT NULL DEFAULT 0,
+    lock_until      DATETIME(3) NULL,
+    updated_at      DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+                        ON UPDATE CURRENT_TIMESTAMP(3)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS sessions (
