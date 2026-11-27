@@ -15,11 +15,12 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-# Windows venv 下 Streamlit 子进程有时会落到 base Python（无 site-packages），
-# 这里强制把唯一保留的 GPU 环境 site-packages 放到最前，避免页面误报无 CUDA。
-_GPU_ENV_SITE = Path(r"D:\PCB_envs\pcb_stage5_cu124\Lib\site-packages")
-if _GPU_ENV_SITE.is_dir():
-    _site = str(_GPU_ENV_SITE)
+# Windows 下 Streamlit 子进程偶发落到 base Python；仅前置项目内 .venv，
+# 不写死机器绝对路径，换机/重装只要重建 .venv 即可。
+_APP_ROOT = Path(__file__).resolve().parent
+_VENV_SITE = _APP_ROOT / ".venv" / "Lib" / "site-packages"
+if _VENV_SITE.is_dir():
+    _site = str(_VENV_SITE)
     if _site in sys.path:
         sys.path.remove(_site)
     sys.path.insert(0, _site)
@@ -546,13 +547,6 @@ def _set_auth_message(message: str, kind: str = "info") -> None:
     st.session_state.auth_message_type = kind
 
 
-def _cookie_manager():
-    """浏览器 Cookie 读写（登录态跨刷新）。"""
-    import extra_streamlit_components as esc
-
-    return esc.CookieManager(key="pcb_auth_cookie_mgr")
-
-
 def _apply_logged_in_user(
     *,
     username: str,
@@ -561,6 +555,7 @@ def _apply_logged_in_user(
     role: str,
     auth_exp: int | None,
     source: str,
+    auth_token: str | None = None,
 ) -> None:
     st.session_state.logged_in = True
     st.session_state.operator = display_name
@@ -569,6 +564,8 @@ def _apply_logged_in_user(
     st.session_state.user_role = role or "user"
     st.session_state.auth_exp = auth_exp
     st.session_state.auth_message = ""
+    if auth_token:
+        st.session_state._auth_token = auth_token
     st.session_state.logger.info(
         "UI 登录生效 source=%s username=%s role=%s session=%s exp=%s",
         source,
@@ -579,22 +576,40 @@ def _apply_logged_in_user(
     )
 
 
-def try_restore_login(cookie_manager) -> bool:
-    """刷新后从 Cookie 恢复登录；成功返回 True。"""
+def _ensure_auth_cookie_written() -> None:
+    """已登录时若父页面尚无 cookie，则补写（防止登录当帧 st.rerun 丢写）。"""
+    token = st.session_state.get("_auth_token")
+    exp_ts = st.session_state.get("auth_exp")
+    if not token or not exp_ts:
+        return
+    existing = read_token_from_browser()
+    if existing and verify_token(existing) is not None:
+        return
+    save_auth_cookie(None, str(token), int(exp_ts))
+
+
+def try_restore_login(_cookie_manager=None) -> bool:
+    """刷新后从父页面 Cookie（st.context.cookies）恢复登录。"""
     if st.session_state.get("logged_in"):
         return True
     if st.session_state.get("_auth_restore_checked"):
         return False
-    st.session_state._auth_restore_checked = True
 
-    token = read_token_from_browser(cookie_manager)
+    token = read_token_from_browser()
+    if not token:
+        st.session_state._auth_restore_checked = True
+        return False
+
     payload = verify_token(token)
     if payload is None:
+        st.session_state._auth_restore_checked = True
+        clear_auth_cookie(None)
         return False
 
     user = audit().db.get_user(payload["username"])
     if user is None or not user.get("is_active", 1):
-        clear_auth_cookie(cookie_manager)
+        st.session_state._auth_restore_checked = True
+        clear_auth_cookie(None)
         return False
 
     display_name = user.get("display_name") or payload["display_name"] or payload["username"]
@@ -622,7 +637,9 @@ def try_restore_login(cookie_manager) -> bool:
         role=role,
         auth_exp=payload.get("exp"),
         source="cookie",
+        auth_token=token,
     )
+    st.session_state._auth_restore_checked = True
     return True
 
 
@@ -710,7 +727,9 @@ def render_login() -> None:
                         role=role,
                         display_name=display_name,
                     )
-                    save_auth_cookie(st.session_state._cookie_manager, token, exp_ts)
+                    # 先记入 session，下一帧由 _ensure_auth_cookie_written 写父页面 cookie
+                    st.session_state._auth_token = token
+                    save_auth_cookie(None, token, exp_ts)
                     blog(
                         audit().log_event(
                             "SESSION_LOGIN_OK",
@@ -729,6 +748,7 @@ def render_login() -> None:
                         role=role,
                         auth_exp=exp_ts,
                         source="password",
+                        auth_token=token,
                     )
                     st.rerun()
                 return
@@ -936,7 +956,7 @@ def render_sidebar():
         st.sidebar.warning(
             "当前进程检测不到 CUDA，实际将使用 CPU。\n"
             f"解释器：`{_sys.executable}`\n"
-            "请用 `启动界面.bat` 或 `D:\\PCB_envs\\pcb_stage5_cu124\\Scripts\\python.exe` 启动。"
+            "请用 `启动界面.bat` 或项目内 `.venv\\Scripts\\python.exe` 启动。"
         )
     conf = st.sidebar.slider("置信度 conf", 0.05, 0.95, float(st.session_state.prev_conf), 0.01)
     iou = st.sidebar.slider("NMS IoU", 0.10, 0.95, float(st.session_state.prev_iou), 0.01)
@@ -979,15 +999,14 @@ def render_sidebar():
             st.session_state.operator,
             audit().session_id,
         )
-        cm = st.session_state.get("_cookie_manager")
-        if cm is not None:
-            clear_auth_cookie(cm)
+        clear_auth_cookie(None)
         st.session_state.logged_in = False
         st.session_state.operator = ""
         st.session_state.username = ""
         st.session_state.user_id = None
         st.session_state.user_role = "user"
         st.session_state.auth_exp = None
+        st.session_state.pop("_auth_token", None)
         st.session_state.login_username = ""
         st.session_state.auth_panel = "登录"
         st.session_state._auth_restore_checked = True  # 退出后本会话不再自动恢复
@@ -1563,14 +1582,15 @@ def main() -> None:
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    cookie_manager = _cookie_manager()
-    st.session_state._cookie_manager = cookie_manager
-    try_restore_login(cookie_manager)
+    try_restore_login()
 
     if not st.session_state.logged_in:
         render_login()
         audit().heartbeat({"page": "login"})
         return
+
+    # 登录成功后持续确保父页面 cookie 已写入，刷新才能恢复
+    _ensure_auth_cookie_written()
 
     st.title("PCB 缺陷检测系统")
     st.caption(

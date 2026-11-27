@@ -2,7 +2,8 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 
-set "VENV=D:\PCB_envs\pcb_stage5_cu124"
+REM 只使用项目内 .venv（可移植）；不要写死其它盘符上的绝对路径
+set "VENV=%~dp0.venv"
 set "PY=%VENV%\Scripts\python.exe"
 set "VIRTUAL_ENV=%VENV%"
 set "PYTHONNOUSERSITE=1"
@@ -10,13 +11,14 @@ set "PYTHONPATH=%VENV%\Lib\site-packages"
 set "PATH=%VENV%\Scripts;%PATH%"
 
 if not exist "%PY%" (
-  echo [ERROR] 找不到 GPU 环境: %PY%
+  echo [ERROR] 找不到项目 GPU 环境: %PY%
+  echo 请先按环境说明重建 .venv（需 torch+cu124）。
   pause
   exit /b 1
 )
 
 echo ========================================
-echo  PCB UI 启动（强制 GPU 环境）
+echo  PCB UI 启动（项目 .venv）
 echo  Python: %PY%
 echo  URL:    http://127.0.0.1:8765
 echo ========================================
@@ -25,7 +27,7 @@ echo ========================================
 if errorlevel 2 (
   echo [WARN] 当前环境 CUDA 不可用，界面仍会启动但会走 CPU
 ) else if errorlevel 1 (
-  echo [ERROR] PyTorch 检查失败，请确认 D:\PCB_envs\pcb_stage5_cu124
+  echo [ERROR] PyTorch 检查失败，请确认 .venv 已安装 torch+cu124
   pause
   exit /b 1
 )

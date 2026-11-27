@@ -1,5 +1,12 @@
 """
-登录态持久化：浏览器 Cookie + HMAC 签名，刷新页面后在有效期内自动恢复登录。
+登录态持久化：父页面 Cookie + HMAC 签名。
+
+说明：
+- extra_streamlit_components.CookieManager 在 iframe 内写 cookie，父页面
+  document.cookie / 刷新后的 HTTP Cookie 头经常读不到（日志里从无
+  SESSION_LOGIN_RESTORE 即为此）。
+- 这里改为 components.html 写 window.parent.document.cookie，
+  刷新后用 st.context.cookies 同步读取。
 """
 
 from __future__ import annotations
@@ -9,9 +16,10 @@ import hashlib
 import hmac
 import secrets
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 # 登录保持时长（小时）
 AUTH_TTL_HOURS = 12
@@ -98,7 +106,8 @@ def verify_token(token: str | None) -> dict[str, Any] | None:
 
 
 def read_token_from_browser(cookie_manager: Any | None = None) -> str | None:
-    """优先读本次 HTTP 请求带来的 cookie（刷新后立即可用）。"""
+    """刷新后优先读 HTTP 请求带来的父页面 cookie（立即可用）。"""
+    del cookie_manager  # 兼容旧调用签名；不再依赖 CookieManager
     try:
         import streamlit as st
 
@@ -106,52 +115,87 @@ def read_token_from_browser(cookie_manager: Any | None = None) -> str | None:
         if cookies is not None:
             val = cookies.get(AUTH_COOKIE_NAME)
             if val:
-                return str(val)
+                text = str(val).strip()
+                # 兼容被 encodeURIComponent / 多余引号包裹的情况
+                if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+                    text = text[1:-1]
+                try:
+                    text = unquote(text)
+                except Exception:
+                    pass
+                return text or None
     except Exception:
         pass
-
-    if cookie_manager is not None:
-        try:
-            val = cookie_manager.get(AUTH_COOKIE_NAME)
-            if val:
-                return str(val)
-        except Exception:
-            pass
     return None
 
 
 def save_auth_cookie(cookie_manager: Any, token: str, exp_ts: int) -> None:
-    expires_at = datetime.fromtimestamp(exp_ts)
-    # lax：本机 http 刷新/跳转都能带上；strict 在部分嵌入场景会丢
-    cookie_manager.set(
-        AUTH_COOKIE_NAME,
-        token,
-        key="pcb_set_auth_cookie",
-        path="/",
-        expires_at=expires_at,
-        max_age=float(max(1, exp_ts - int(time.time()))),
-        same_site="lax",
+    """把登录 token 写到父页面 document.cookie（不是 iframe）。"""
+    del cookie_manager
+    max_age = int(max(1, exp_ts - int(time.time())))
+    # token 为 urlsafe base64，再做一次 JS 字符串转义
+    safe = (
+        str(token)
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace('"', '\\"')
+        .replace("\n", "")
+        .replace("\r", "")
     )
+    name = AUTH_COOKIE_NAME
+    js = f"""
+<script>
+(function() {{
+  try {{
+    var v = encodeURIComponent("{safe}");
+    var c = "{name}=" + v + "; path=/; max-age={max_age}; SameSite=Lax";
+    var root = window.parent && window.parent !== window ? window.parent : window;
+    root.document.cookie = c;
+  }} catch (e) {{
+    try {{ document.cookie = "{name}=" + encodeURIComponent("{safe}") + "; path=/; max-age={max_age}; SameSite=Lax"; }} catch (e2) {{}}
+  }}
+}})();
+</script>
+"""
+    try:
+        import streamlit.components.v1 as components
+
+        components.html(js, height=0, width=0)
+    except Exception:
+        # 极端环境下退回 markdown（部分 Streamlit 会过滤 script）
+        try:
+            import streamlit as st
+
+            st.markdown(js, unsafe_allow_html=True)
+        except Exception:
+            pass
 
 
 def clear_auth_cookie(cookie_manager: Any) -> None:
+    del cookie_manager
+    js = f"""
+<script>
+(function() {{
+  try {{
+    var root = window.parent && window.parent !== window ? window.parent : window;
+    root.document.cookie = "{AUTH_COOKIE_NAME}=; path=/; max-age=0; SameSite=Lax";
+  }} catch (e) {{
+    try {{ document.cookie = "{AUTH_COOKIE_NAME}=; path=/; max-age=0; SameSite=Lax"; }} catch (e2) {{}}
+  }}
+}})();
+</script>
+"""
     try:
-        cookie_manager.delete(AUTH_COOKIE_NAME, key="pcb_del_auth_cookie")
+        import streamlit.components.v1 as components
+
+        components.html(js, height=0, width=0)
     except Exception:
-        pass
-    # 再写一个立即过期的空值，兼容部分浏览器删不掉的情况
-    try:
-        cookie_manager.set(
-            AUTH_COOKIE_NAME,
-            "",
-            key="pcb_clear_auth_cookie",
-            path="/",
-            expires_at=datetime.utcnow() - timedelta(days=1),
-            max_age=0,
-            same_site="lax",
-        )
-    except Exception:
-        pass
+        try:
+            import streamlit as st
+
+            st.markdown(js, unsafe_allow_html=True)
+        except Exception:
+            pass
 
 
 def format_exp(exp_ts: int | None) -> str:

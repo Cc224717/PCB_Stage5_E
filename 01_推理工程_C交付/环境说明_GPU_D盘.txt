@@ -1,20 +1,14 @@
-GPU 运行环境（唯一保留）
+GPU 运行环境（项目内 .venv）
 ====================
-- 物理环境：D:\PCB_envs\pcb_stage5_cu124
-- 路径备忘：D:\PCB_envs\PYTORCH_唯一环境.txt
-- 项目入口：01_推理工程_C交付\.venv  （目录联接 -> 上述 D 盘路径）
-- PyTorch：2.6.0+cu124
-- GPU：NVIDIA GeForce RTX 3050 Laptop GPU（驱动支持 CUDA 12.7）
-- UI / 推理：有 CUDA 时自动使用 device=0，否则回退 CPU
+- 启动入口：01_推理工程_C交付\.venv\Scripts\python.exe
+- 推荐启动：双击 启动界面.bat（强制用项目 .venv，不写死其它盘符）
+- PyTorch：2.6.0+cu124（见 requirements-lock.txt）
+- GPU：有 CUDA 时自动使用 device=0，否则回退 CPU
 
-用户环境变量：
-  PCB_PYTORCH_HOME = D:\PCB_envs\pcb_stage5_cu124
-  PCB_PYTHON       = D:\PCB_envs\pcb_stage5_cu124\Scripts\python.exe
-  PYTORCH_ENV      = D:\PCB_envs\pcb_stage5_cu124
-  Path 已加入 Scripts 目录
+说明：
+- 代码与 bat 只依赖项目内 .venv，换机器请在本目录重建/同步 .venv。
+- 本机若曾把环境放在其它盘（如 D:\PCB_envs\...），可用目录联接指到 .venv，
+  但不要在 ui_app.py / 启动脚本里写死绝对路径。
 
-验证（新开终端）：
-  echo %PCB_PYTHON%
-  "%PCB_PYTHON%" -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-  或：
+验证（在 01_推理工程_C交付 目录）：
   .\.venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch.cuda.is_available())"

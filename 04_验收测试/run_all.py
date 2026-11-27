@@ -96,6 +96,9 @@ CASES = [
     ("c50", "会话级联删除", "cases.c50_session_cascade"),
     ("c51", "注册面板崩溃回归", "cases.c51_register_panel_bug"),
     ("c52", "注册角色防护", "cases.c52_register_role_guard"),
+    ("c53", "历史operator可见性", "cases.c53_chao_history_visibility"),
+    ("c54", "阈值滑条边界", "cases.c54_threshold_ui_bounds"),
+    ("c55", "依赖锁定完整性", "cases.c55_requirements_lock_gap"),
 ]
 
 
